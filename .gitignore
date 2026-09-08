@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build and test output
+dist/
+build/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+playwright-report/
+test-results/
+blob-report/
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+config/*.local.yml
+config/*.local.yaml
+config/*.secret.yml
+config/*.secret.yaml
+
+# Secrets and credentials
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime state
+data/
+state/
+storage/
+profiles/
+browser-profiles/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+
+# Local knowledge output
+/archive/
+/Private/Inbox/
+
+# Logs, caches, and temporary files
+logs/
+*.log
+npm-debug.log*
+.cache/
+.tmp/
+tmp/
+temp/
+
+# Local editor files
+.idea/
+.vscode/
+.agents/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

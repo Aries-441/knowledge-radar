@@ -1,0 +1,12 @@
+.git/
+.agents/
+node_modules/
+dist/
+archive/
+Private/
+docs/
+openspec/
+.env
+.env.*
+!.env.example
+*.log

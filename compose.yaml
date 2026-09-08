@@ -1,0 +1,12 @@
+services:
+  radar:
+    build: .
+    init: true
+    shm_size: 1gb
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      KNOWLEDGE_RADAR_ARCHIVE_DIR: /archive
+    volumes:
+      - ${KNOWLEDGE_RADAR_ARCHIVE_DIR_HOST:?Set KNOWLEDGE_RADAR_ARCHIVE_DIR_HOST in .env}:/archive
