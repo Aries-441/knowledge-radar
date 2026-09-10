@@ -1,0 +1,11 @@
+services:
+  radar:
+    environment:
+      KNOWLEDGE_RADAR_ARCHIVE_DIR: /app/archive
+    shm_size: 1gb
+    volumes:
+      - type: bind
+        source: ${KNOWLEDGE_RADAR_ARCHIVE_DIR_HOST:?Set a dedicated archive directory}
+        target: /app/archive
+        bind:
+          create_host_path: false

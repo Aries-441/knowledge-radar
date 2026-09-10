@@ -10,3 +10,14 @@ openspec/
 .env.*
 !.env.example
 *.log
+data/
+state/
+storage/
+profiles/
+browser-profiles/
+secrets/
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.pem
+**/*.key

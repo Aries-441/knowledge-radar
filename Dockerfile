@@ -18,7 +18,7 @@ WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-RUN chown -R pwuser:pwuser /app
+RUN mkdir -p /var/lib/knowledge-radar && chown -R pwuser:pwuser /app /var/lib/knowledge-radar
 
 USER pwuser
 ENTRYPOINT ["node", "dist/cli.js"]

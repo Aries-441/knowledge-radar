@@ -1,0 +1,18 @@
+services:
+  radar:
+    build: .
+    command: ["serve-feishu"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 100s
+    env_file:
+      - path: ${RADAR_ENV_FILE:-.env}
+        required: true
+    environment:
+      KNOWLEDGE_RADAR_STATE_PATH: /var/lib/knowledge-radar/radar.db
+      KNOWLEDGE_RADAR_ARCHIVE_DIR: ""
+    volumes:
+      - radar-state:/var/lib/knowledge-radar
+
+volumes:
+  radar-state:

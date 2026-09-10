@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { AgentRuntime } from "./agent-runtime.js";
-import type { ArticleLoader } from "./article.js";
-import { captureArticle } from "./capture-article.js";
+import type { AgentRuntime } from "../agent/article-summary.js";
+import type { ArticleLoader } from "./model.js";
+import { captureArticle } from "./capture.js";
 
 const renderArticle: ArticleLoader = async () => ({
   title: "Test article",
@@ -34,6 +34,10 @@ test("captures an article and archives only its summary", async () => {
     assert.equal(result.title, "Test article");
     assert.equal(result.sourceUrl, "https://example.com/article");
     assert.match(markdown, /# Test article/);
+    assert.match(result.archivePath, /^Test article--[a-f0-9]{8}\.md$/);
+    assert.match(markdown, /任务创建时间：2026-09-08T12:00:00.000Z/);
+    assert.match(markdown, /摘要生成时间：2026-09-08T12:00:00.000Z/);
+    assert.match(markdown, /任务 ID：[a-f0-9-]{36}/);
     assert.match(markdown, /A test summary/);
     assert.match(markdown, /First point/);
     assert.doesNotMatch(markdown, /This body must never appear/);
