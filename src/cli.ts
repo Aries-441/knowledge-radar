@@ -1,7 +1,7 @@
 import { runCli } from "./cli/command.js";
 
 process.exitCode = await runCli(process.argv.slice(2), {
-  serveFeishu: async (config) => {
+  serveFeishu: async (config, feedConfig) => {
     const { serveFeishu } = await import("./runtime/feishu-service.js");
     const { replyWithPi } = await import("./agent/topic-runtime.js");
     const controller = new AbortController();
@@ -9,7 +9,7 @@ process.exitCode = await runCli(process.argv.slice(2), {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
-      const result = await serveFeishu({ config, agent: replyWithPi, signal: controller.signal,
+      const result = await serveFeishu({ config, feedConfig, agent: replyWithPi, signal: controller.signal,
         log: record => console.error(JSON.stringify(record)) });
       if (!result.drained) process.exit(1);
       return result.exitCode;

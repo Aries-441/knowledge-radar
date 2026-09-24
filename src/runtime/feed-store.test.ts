@@ -1,0 +1,88 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { openRuntimeStore } from "./store.js";
+
+function setup() {
+  const clock = { now: 1_000 };
+  const store = openRuntimeStore({ path: ":memory:", now: () => clock.now, createToken: (() => { let n = 0; return () => `token-${++n}`; })() });
+  return { store, clock };
+}
+
+const feeds = [
+  { id: "one", name: "One", url: "https://example.com/one.xml", enabled: true, priority: 1, tags: ["a"], itemLimit: 20 },
+  { id: "off", name: "Off", url: "https://example.com/off.xml", enabled: false, priority: 2, tags: [], itemLimit: 20 },
+];
+
+function parsed(items: { identityKey: string; canonicalUrl: string | null; title: string; summary: string; author: string | null; publishedAt: number | null }[]) {
+  return { finalUrl: "https://example.com/one.xml", etag: "v1", lastModified: null, notModified: false, title: "One", siteUrl: "https://example.com", items };
+}
+
+test("syncs sources without resetting cache state and only schedules enabled sources", () => {
+  const { store } = setup();
+  try {
+    assert.equal(store.syncFeedSources(feeds).length, 2);
+    assert.equal(store.listFeedSources(true).map(source => source.id).join(), "one");
+    const jobs = store.ensureFeedPollJobs(60_000);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].kind, "feed_poll");
+    store.syncFeedSources([{ ...feeds[0], name: "Renamed", tags: ["b"] }, feeds[1]]);
+    assert.equal(store.getFeedSource("one")?.etag, null);
+    assert.equal(store.getFeedSource("one")?.name, "Renamed");
+    assert.equal(store.claimJob(100, "capture_article"), null);
+    assert.equal(store.claimJob(100, "feed_poll")?.kind, "feed_poll");
+  } finally { store.close(); }
+});
+
+test("commits first successful feed as baseline and later identities as candidates", () => {
+  const { store, clock } = setup();
+  try {
+    store.syncFeedSources([feeds[0]]);
+    const firstJob = store.ensureFeedPollJobs(60_000)[0];
+    const firstClaim = store.claimJob(10_000, "feed_poll")!;
+    const first = parsed([
+      { identityKey: "id:a", canonicalUrl: "https://example.com/a", title: "A", summary: "A", author: null, publishedAt: 1 },
+      { identityKey: "id:b", canonicalUrl: "https://example.com/b", title: "B", summary: "B", author: "author", publishedAt: 2 },
+    ]);
+    const result = store.commitFeedPoll(firstJob.id, firstClaim.runToken!, first);
+    assert.deepEqual(result && { baseline: result.baseline, newItems: result.newItems }, { baseline: true, newItems: 2 });
+    assert.deepEqual(store.listFeedItems("one").map(item => item.state), ["baseline", "baseline"]);
+    const firstSeen = store.listFeedItems("one")[0].firstSeenAt;
+
+    clock.now += 60_001;
+    const secondJob = store.ensureFeedPollJobs(60_000)[0];
+    const secondClaim = store.claimJob(10_000, "feed_poll")!;
+    const second = parsed([
+      { identityKey: "id:a", canonicalUrl: "https://example.com/a-new", title: "A updated", summary: "A2", author: null, publishedAt: 3 },
+      { identityKey: "id:c", canonicalUrl: "https://example.com/c", title: "C", summary: "C", author: null, publishedAt: 4 },
+    ]);
+    second.etag = "v2";
+    const secondResult = store.commitFeedPoll(secondJob.id, secondClaim.runToken!, second);
+    assert.equal(secondResult?.baseline, false);
+    assert.equal(secondResult?.newItems, 1);
+    const items = store.listFeedItems("one");
+    assert.equal(items.length, 3);
+    assert.equal(items.find(item => item.identityKey === "id:a")?.firstSeenAt, firstSeen);
+    assert.equal(items.find(item => item.identityKey === "id:a")?.state, "baseline");
+    assert.equal(items.find(item => item.identityKey === "id:a")?.canonicalUrl, "https://example.com/a-new");
+    assert.equal(items.find(item => item.identityKey === "id:c")?.state, "candidate");
+    assert.equal(store.getJob(secondJob.id)?.state, "succeeded");
+  } finally { store.close(); }
+});
+
+test("feed failure retry and lease recovery are fenced by token", () => {
+  const { store, clock } = setup();
+  try {
+    store.syncFeedSources([feeds[0]]);
+    const job = store.ensureFeedPollJobs(60_000)[0];
+    const claim = store.claimJob(100)!;
+    assert.ok(claim.runToken);
+    clock.now += 101;
+    assert.equal(store.recoverFeedPollJobs(), 1);
+    assert.equal(store.recordFeedPollFailure(job.id, claim.runToken!, "feed_timeout", true, clock.now + 60_000), false);
+    const recovered = store.claimJob(100, "feed_poll");
+    assert.ok(recovered?.runToken);
+    assert.equal(store.recordFeedPollFailure(job.id, "old-token", "feed_timeout", true, clock.now + 60_000), false);
+    assert.equal(store.recordFeedPollFailure(job.id, recovered.runToken!, "feed_timeout", true, clock.now + 60_000), true);
+    assert.equal(store.getJob(job.id)?.state, "pending");
+  } finally { store.close(); }
+});

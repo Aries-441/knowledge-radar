@@ -1,6 +1,6 @@
 # 飞书私聊与公开文章采集
 
-当前代码为 v3：仅支持一个授权用户私聊，一个私聊固定一个 Conversation；群聊、图片和未授权消息忽略。基础配置提供聊天；启用归档后，单独 URL 或 `总结 <URL>` 由独立 Job 采集。聊天文字及公开文章正文会发送给配置的模型供应商，聊天和结构化摘要保存在 radar.db，文章全文不归档。代码验收与真实部署分别记录于 [URL 采集验收](url-capture-verification.md)。
+当前代码支持一个授权用户私聊、公开文章采集和可选 RSS/Atom 每日摘要；群聊、图片和未授权消息忽略。订阅候选保存在 radar.db，摘要由机器人主动发送到 `FEISHU_ALLOWED_OPEN_ID`。聊天文字及公开文章正文会发送给配置的模型供应商，文章全文不归档。代码验收与真实部署分别记录于 [URL 采集验收](url-capture-verification.md)。
 
 ## 1. 应用与配置
 
@@ -46,7 +46,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml stop
 
 此文件可独立使用，不要叠加文章采集的 compose.yaml。非 root 用户运行，无监听端口；命名卷挂到 /var/lib/knowledge-radar，数据库固定为其下 radar.db。密钥通过环境变量注入，不会进入镜像，但本机有 Docker 管理权限的人仍可读取容器配置。
 
-每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。v1/v2 原子迁移到 v3，旧代码拒绝 v3；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
+每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v5，旧代码拒绝 v5；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
 
 ### 开启公开文章采集
 

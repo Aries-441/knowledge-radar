@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { numberValue } from "./serialization.js";
 import { RuntimeStoreError } from "./types.js";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 
 export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(operation: () => T) => T): void {
   transaction(() => {
@@ -12,6 +12,7 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
       throw new RuntimeStoreError(`State database version ${current} is newer than supported version ${SCHEMA_VERSION}`);
     }
     if (current === SCHEMA_VERSION) return;
+    const exists = (name: string) => Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name));
 
     if (current === 0) database.exec(`
       CREATE TABLE conversations (
@@ -81,7 +82,7 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
       CREATE INDEX outbox_claim_index ON outbox (state, available_at, created_at);
       PRAGMA user_version = 1;
     `);
-    if (current < 2) database.exec(`
+    if (current < 2 && !exists("feishu_chats")) database.exec(`
       CREATE TABLE feishu_chats (
         app_id TEXT NOT NULL,
         tenant_key TEXT NOT NULL,
@@ -105,7 +106,7 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
       CREATE INDEX feishu_owner_index ON feishu_chats(app_id, tenant_key, owner_open_id);
       PRAGMA user_version = 2;
     `);
-    database.exec(`
+    if (current < 3 && !exists("article_captures")) database.exec(`
       CREATE UNIQUE INDEX capture_origin_unique ON jobs(origin_turn_id)
         WHERE kind = 'capture_article' AND origin_turn_id IS NOT NULL;
       CREATE TABLE article_captures (
@@ -114,5 +115,55 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
       ) STRICT;
       PRAGMA user_version = 3;
     `);
+    if (current < 4 && !exists("feed_sources")) database.exec(`
+      CREATE TABLE feed_sources (
+        id TEXT PRIMARY KEY NOT NULL,
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
+        url TEXT NOT NULL CHECK (length(url) BETWEEN 1 AND 2048),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        priority INTEGER NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags_json) AND json_type(tags_json) = 'array' AND length(tags_json) <= 4096),
+        etag TEXT CHECK (etag IS NULL OR length(etag) <= 1024),
+        last_modified TEXT CHECK (last_modified IS NULL OR length(last_modified) <= 256),
+        baseline_at INTEGER,
+        last_checked_at INTEGER,
+        last_success_at INTEGER,
+        error_code TEXT CHECK (error_code IS NULL OR length(error_code) <= 128),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE feed_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        feed_id TEXT NOT NULL REFERENCES feed_sources(id) ON DELETE CASCADE,
+        identity_key TEXT NOT NULL CHECK (length(identity_key) BETWEEN 1 AND 2048),
+        canonical_url TEXT CHECK (canonical_url IS NULL OR length(canonical_url) BETWEEN 1 AND 2048),
+        title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 1024),
+        summary TEXT CHECK (summary IS NULL OR length(summary) <= 8192),
+        author TEXT CHECK (author IS NULL OR length(author) <= 512),
+        published_at INTEGER,
+        first_seen_at INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('baseline', 'candidate')),
+        error_code TEXT CHECK (error_code IS NULL OR length(error_code) <= 128),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (feed_id, identity_key)
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS feed_sources_enabled_priority_index ON feed_sources(enabled, priority, id);
+      CREATE INDEX IF NOT EXISTS feed_items_feed_state_first_seen_index ON feed_items(feed_id, state, first_seen_at);
+      CREATE INDEX IF NOT EXISTS feed_items_published_index ON feed_items(published_at);
+      CREATE INDEX IF NOT EXISTS jobs_kind_claim_index ON jobs(kind, state, available_at, created_at, id);
+      PRAGMA user_version = 4;
+    `);
+    if (current < 5) {
+      if (!database.prepare("PRAGMA table_info(feed_items)").all().some(row => row.name === "notified_at")) {
+        database.exec("ALTER TABLE feed_items ADD COLUMN notified_at INTEGER");
+      }
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS feed_items_unnotified_index ON feed_items(state, notified_at, feed_id);
+        PRAGMA user_version = 5;
+      `);
+    }
   });
 }

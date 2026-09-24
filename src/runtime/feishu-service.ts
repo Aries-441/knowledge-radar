@@ -8,6 +8,11 @@ import { processConversationOnce } from "./turn-worker.js";
 import { processCaptureJobOnce, type CaptureDependencies } from "./capture-worker.js";
 import { probeArchive } from "../article/durable-archive.js";
 import { CaptureCleanupError } from "../article/capture-error.js";
+import type { FeedConfig } from "../feed/config.js";
+import { scheduleFeedPollsOnce } from "../feed/scheduler.js";
+import { processFeedPollOnce } from "../feed/worker.js";
+import { scheduleFeedDigestOnce } from "../feed/digest-scheduler.js";
+import { processFeedDigestOnce } from "../feed/digest-worker.js";
 
 export async function deliverFeishuOnce({ store, scope, send, now = Date.now, log = () => {} }: {
   store: RuntimeStore; scope: FeishuScope; send: FeishuSend; now?: () => number; log?: SafeLog;
@@ -76,6 +81,7 @@ export type FeishuServiceOptions = {
   drainTimeoutMs?: number;
   capture?: CaptureDependencies;
   probeArchive?: typeof probeArchive;
+  feedConfig?: FeedConfig;
 };
 
 export async function serveFeishu(options: FeishuServiceOptions): Promise<{ exitCode: number; drained: boolean }> {
@@ -144,6 +150,23 @@ export async function serveFeishu(options: FeishuServiceOptions): Promise<{ exit
       loops.push(loop(async () => (await processCaptureJobOnce({ store: activeStore, scope: config,
         archiveDir: captureAvailable ? config.archiveDir : undefined, now, log, dependencies: options.capture,
       })).outcome !== "idle").catch(() => { log({ event: "service_failed", error_code: "loop_failure" }); stop(1); }));
+      if (options.feedConfig?.feeds.some(feed => feed.enabled)) {
+        loops.push(loop(async () => scheduleFeedPollsOnce({ store: activeStore, config: options.feedConfig!, now }) > 0)
+          .catch(() => { log({ event: "service_failed", error_code: "feed_scheduler_failure" }); stop(1); }));
+        loops.push(loop(async () => (await processFeedPollOnce({
+          store: activeStore, config: options.feedConfig!, now, signal: stopping.signal, log,
+        })).outcome !== "idle").catch(() => { if (!stopping.signal.aborted) { log({ event: "service_failed", error_code: "feed_worker_failure" }); stop(1); } }));
+        if (options.feedConfig.digest?.enabled) {
+          if (!activeTransport.sendText) throw new FeishuError("feishu_configuration", true);
+          const sendText = activeTransport.sendText;
+          loops.push(loop(async () => scheduleFeedDigestOnce({
+            store: activeStore, config: options.feedConfig!, scope: config, now,
+          })).catch(() => { log({ event: "service_failed", error_code: "feed_digest_scheduler_failure" }); stop(1); }));
+          loops.push(loop(async () => (await processFeedDigestOnce({
+            store: activeStore, config: options.feedConfig!, scope: config, send: sendText, now, log,
+          })).outcome !== "idle").catch(() => { if (!stopping.signal.aborted) { log({ event: "service_failed", error_code: "feed_digest_worker_failure" }); stop(1); } }));
+        }
+      }
       }
     }
   } catch {

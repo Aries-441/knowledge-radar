@@ -1,4 +1,4 @@
-import { type Conversation, type Job, type Outbox, RuntimeStoreError, StorageBusyError, type Turn } from "./types.js";
+import { type Conversation, type FeedItem, type FeedSource, type Job, type Outbox, RuntimeStoreError, StorageBusyError, type Turn } from "./types.js";
 
 export function conversationFromRow(row: Record<string, unknown>): Conversation {
   return {
@@ -45,6 +45,47 @@ export function jobFromRow(row: Record<string, unknown>): Job {
     leaseExpiresAt: nullableNumberValue(row, "lease_expires_at"),
     attempts: numberValue(row, "attempts"),
     maxAttempts: numberValue(row, "max_attempts"),
+    createdAt: numberValue(row, "created_at"),
+    updatedAt: numberValue(row, "updated_at"),
+  };
+}
+
+export function feedSourceFromRow(row: Record<string, unknown>): FeedSource {
+  let tags: unknown;
+  try { tags = JSON.parse(textValue(row, "tags_json")); } catch { throw new RuntimeStoreError("Feed tags contain invalid JSON"); }
+  if (!Array.isArray(tags) || tags.some(tag => typeof tag !== "string")) throw new RuntimeStoreError("Feed tags are invalid");
+  return {
+    id: textValue(row, "id"),
+    name: textValue(row, "display_name"),
+    url: textValue(row, "url"),
+    enabled: numberValue(row, "enabled") === 1,
+    priority: numberValue(row, "priority"),
+    tags,
+    etag: nullableTextValue(row, "etag"),
+    lastModified: nullableTextValue(row, "last_modified"),
+    baselineAt: nullableNumberValue(row, "baseline_at"),
+    lastCheckedAt: nullableNumberValue(row, "last_checked_at"),
+    lastSuccessAt: nullableNumberValue(row, "last_success_at"),
+    errorCode: nullableTextValue(row, "error_code"),
+    createdAt: numberValue(row, "created_at"),
+    updatedAt: numberValue(row, "updated_at"),
+  };
+}
+
+export function feedItemFromRow(row: Record<string, unknown>): FeedItem {
+  return {
+    id: textValue(row, "id"),
+    feedId: textValue(row, "feed_id"),
+    identityKey: textValue(row, "identity_key"),
+    canonicalUrl: nullableTextValue(row, "canonical_url"),
+    title: textValue(row, "title"),
+    summary: nullableTextValue(row, "summary"),
+    author: nullableTextValue(row, "author"),
+    publishedAt: nullableNumberValue(row, "published_at"),
+    firstSeenAt: numberValue(row, "first_seen_at"),
+    state: textValue(row, "state") as FeedItem["state"],
+    notifiedAt: nullableNumberValue(row, "notified_at"),
+    errorCode: nullableTextValue(row, "error_code"),
     createdAt: numberValue(row, "created_at"),
     updatedAt: numberValue(row, "updated_at"),
   };

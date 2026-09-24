@@ -97,3 +97,5 @@
 - 独立 Web 管理后台
 
 这些功能只有在现有工作流出现明确瓶颈时才重新评估。
+
+The feed ingestion and Feishu digest slices are implemented in `add-feed-ingestion` and `add-feed-digest-feishu`: YAML source configuration, RSS/Atom polling, baseline and candidate state, durable jobs, daily digest generation, proactive Feishu notification, and restart recovery.

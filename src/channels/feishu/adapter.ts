@@ -6,10 +6,12 @@ import type { FeishuAcceptance, FeishuScope, FeishuText, Outbox } from "../../ru
 export type FeishuConfig = FeishuScope & { appSecret: string; statePath: string; archiveDir?: string };
 export type SafeLog = (record: { event: string; [key: string]: string | number | undefined }) => void;
 export type FeishuSend = (messageId: string, outbox: Outbox) => Promise<void>;
+export type FeishuSendText = (receiveId: string, text: string, uuid: string) => Promise<{ messageId: string }>;
 export type FeishuTransport = {
   start: (receive: (event: unknown) => Promise<void>) => Promise<void>;
   close: () => void;
   send: FeishuSend;
+  sendText?: FeishuSendText;
 };
 
 export class FeishuError extends Error {
@@ -73,6 +75,17 @@ export function feishuReplyRequest(messageId: string, outbox: Outbox) {
   if (Buffer.byteLength(content, "utf8") > 20_000) throw new FeishuError("feishu_payload_too_large", true);
   return { path: { message_id: messageId }, data: { msg_type: "text", content,
     uuid: createHash("sha256").update(outbox.id).digest("hex").slice(0, 40) } };
+}
+
+export function feishuTextRequest(receiveId: string, text: string, uuid: string) {
+  if (!nonempty(receiveId) || !nonempty(text) || !/^[a-f0-9]{40}$/.test(uuid)) {
+    throw new FeishuError("feishu_invalid_payload", true);
+  }
+  const content = JSON.stringify({ text });
+  if (Buffer.byteLength(content, "utf8") > 20_000) throw new FeishuError("feishu_payload_too_large", true);
+  return { params: { receive_id_type: "open_id" as const }, data: {
+    receive_id: receiveId, msg_type: "text", content, uuid,
+  } };
 }
 
 export function classifyFeishuError(value: unknown, now = Date.now()): FeishuError {
@@ -150,6 +163,18 @@ export function createFeishuTransport(
       try {
         const response = await deadline.run(controller.signal, () => client.im.message.reply(request));
         if (response.code !== 0 || !nonempty(response.data?.message_id)) throw classifyFeishuError(response);
+      } catch (error) {
+        throw controller.signal.aborted ? new FeishuError("feishu_timeout") : classifyFeishuError(error);
+      } finally { clearTimeout(timer); }
+    },
+    async sendText(receiveId, text, uuid) {
+      const request = feishuTextRequest(receiveId, text, uuid);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), options.sendTimeoutMs ?? 10_000);
+      try {
+        const response = await deadline.run(controller.signal, () => client.im.message.create(request));
+        if (response.code !== 0 || !nonempty(response.data?.message_id)) throw classifyFeishuError(response);
+        return { messageId: response.data.message_id };
       } catch (error) {
         throw controller.signal.aborted ? new FeishuError("feishu_timeout") : classifyFeishuError(error);
       } finally { clearTimeout(timer); }

@@ -1,0 +1,14 @@
+# Optional Feed configuration overlay.
+# Set KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST to a local YAML file, then start with:
+# docker compose -f compose.feishu.yaml -f compose.feishu.capture.yaml -f compose.feeds.yaml up
+services:
+  radar:
+    environment:
+      KNOWLEDGE_RADAR_FEEDS_CONFIG: /run/knowledge-radar/feeds.yaml
+    volumes:
+      - type: bind
+        source: ${KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST:?Set KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST to a Feed YAML file}
+        target: /run/knowledge-radar/feeds.yaml
+        read_only: true
+        bind:
+          create_host_path: false

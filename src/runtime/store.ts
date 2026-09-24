@@ -1,15 +1,20 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { classifyCaptureRequest } from "../article/request.js";
 import { validateCheckpoint, displayTitle, type CaptureCheckpoint } from "../article/durable-archive.js";
 import { captureFailureText, captureReasons, type CaptureErrorCode } from "../article/capture-error.js";
+import type { FeedSourceConfig } from "../feed/config.js";
+import type { ParsedFeed } from "../feed/parser.js";
+import { buildFeedDigest, type DigestCandidate, type DigestPayload } from "../feed/digest.js";
 import type { CaptureContext } from "./types.js";
 
 import {
   conversationFromRow,
   encodeJson,
+  feedItemFromRow,
+  feedSourceFromRow,
   jobFromRow,
   mapSqliteError,
   numberValue,
@@ -26,6 +31,8 @@ import {
   RuntimeStoreError,
   type Conversation,
   type CompletedTurn,
+  type FeedItem,
+  type FeedSource,
   type CreateConversationInput,
   type CreateTurnInput,
   type EnqueueJobInput,
@@ -46,6 +53,8 @@ export type {
   CreateTurnInput,
   EnqueueJobInput,
   EnqueueOutboxInput,
+  FeedItem,
+  FeedSource,
   Job,
   Outbox,
   RuntimeStoreOptions,
@@ -53,6 +62,9 @@ export type {
 } from "./types.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 250;
+const DIGEST_SCOPE_SQL = `json_extract(payload_json, '$.scope.appId') = ?
+  AND json_extract(payload_json, '$.scope.tenantKey') = ?
+  AND json_extract(payload_json, '$.scope.ownerOpenId') = ?`;
 
 const FEISHU_TURNS_SQL = `
   SELECT i.turn_id FROM feishu_inbound_messages i
@@ -227,18 +239,21 @@ export class RuntimeStore {
     });
   }
 
-  claimJob(leaseMs: number): Job | null {
+  claimJob(leaseMs: number, kind?: string, scope?: FeishuScope): Job | null {
     return this.transaction(() => {
       const now = this.currentTime();
       const leaseExpiresAt = this.leaseDeadline(now, leaseMs);
+      const jobKind = kind === undefined ? undefined : requireText(kind, "kind");
       const candidate = this.database
         .prepare(
           `SELECT id FROM jobs
            WHERE state = 'pending' AND available_at <= ? AND attempts < max_attempts
-           ORDER BY available_at, created_at
+             ${jobKind === undefined ? "" : "AND kind = ?"}
+             ${scope ? `AND ${DIGEST_SCOPE_SQL}` : ""}
+           ORDER BY available_at, created_at, id
            LIMIT 1`,
         )
-        .get(now);
+        .get(...(jobKind === undefined ? [now] : [now, jobKind]), ...(scope ? this.feishuScopeParams(scope) : []));
       if (!candidate) return null;
 
       const id = textValue(candidate, "id");
@@ -251,6 +266,244 @@ export class RuntimeStore {
         )
         .run(token, leaseExpiresAt, now, id, now).changes;
       return changed === 1 ? this.getJobRequired(id) : null;
+    });
+  }
+
+  syncFeedSources(feeds: FeedSourceConfig[]): FeedSource[] {
+    const now = this.currentTime();
+    return this.transaction(() => {
+      const ids = new Set<string>();
+      for (const feed of feeds) {
+        const id = requireText(feed.id, "feed.id");
+        const name = requireText(feed.name, "feed.name");
+        const url = requireText(feed.url, "feed.url");
+        const tags = encodeJson(feed.tags, "feed.tags");
+        ids.add(id);
+        const existing = this.database.prepare("SELECT url FROM feed_sources WHERE id = ?").get(id);
+        if (existing && textValue(existing, "url") !== url) {
+          this.database.prepare("DELETE FROM feed_items WHERE feed_id = ?").run(id);
+          this.database.prepare(
+            `UPDATE feed_sources SET display_name = ?, url = ?, enabled = ?, priority = ?, tags_json = ?,
+             etag = NULL, last_modified = NULL, baseline_at = NULL, last_checked_at = NULL,
+             last_success_at = NULL, error_code = NULL, updated_at = ? WHERE id = ?`,
+          ).run(name, url, feed.enabled ? 1 : 0, feed.priority, tags, now, id);
+        } else {
+          this.database.prepare(
+            `INSERT INTO feed_sources
+              (id, display_name, url, enabled, priority, tags_json, etag, last_modified, baseline_at,
+               last_checked_at, last_success_at, error_code, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name,
+               url = excluded.url, enabled = excluded.enabled, priority = excluded.priority,
+               tags_json = excluded.tags_json, updated_at = excluded.updated_at`,
+          ).run(id, name, url, feed.enabled ? 1 : 0, feed.priority, tags, now, now);
+        }
+      }
+      if (ids.size === 0) {
+        this.database.prepare("UPDATE feed_sources SET enabled = 0, updated_at = ?").run(now);
+      } else {
+        const placeholders = [...ids].map(() => "?").join(", ");
+        this.database.prepare(
+          `UPDATE feed_sources SET enabled = 0, updated_at = ? WHERE id NOT IN (${placeholders})`,
+        ).run(now, ...ids);
+      }
+      return this.listFeedSourcesInternal(false);
+    });
+  }
+
+  listFeedSources(enabledOnly = false): FeedSource[] {
+    try { return this.listFeedSourcesInternal(enabledOnly); } catch (error) { throw mapSqliteError(error); }
+  }
+
+  getFeedSource(id: string): FeedSource | null {
+    try {
+      const row = this.database.prepare("SELECT * FROM feed_sources WHERE id = ?").get(requireText(id, "id"));
+      return row ? feedSourceFromRow(row) : null;
+    } catch (error) { throw mapSqliteError(error); }
+  }
+
+  listFeedItems(feedId?: string): FeedItem[] {
+    try {
+      const rows = feedId === undefined
+        ? this.database.prepare("SELECT * FROM feed_items ORDER BY first_seen_at, id").iterate()
+        : this.database.prepare("SELECT * FROM feed_items WHERE feed_id = ? ORDER BY first_seen_at, id").iterate(requireText(feedId, "feedId"));
+      return [...rows].map(row => feedItemFromRow(row));
+    } catch (error) { throw mapSqliteError(error); }
+  }
+
+  ensureFeedPollJobs(intervalMs: number, maxAttempts = 3): Job[] {
+    requirePositiveInteger(intervalMs, "intervalMs");
+    requirePositiveInteger(maxAttempts, "maxAttempts");
+    return this.transaction(() => {
+      const now = this.currentTime();
+      const created: Job[] = [];
+      const rows = this.database.prepare("SELECT * FROM feed_sources WHERE enabled = 1 ORDER BY priority, id").iterate();
+      for (const row of rows) {
+        const source = feedSourceFromRow(row);
+        if (source.lastCheckedAt !== null && now - source.lastCheckedAt < intervalMs) continue;
+        const active = this.database.prepare(
+          "SELECT 1 FROM jobs WHERE kind = 'feed_poll' AND state IN ('pending', 'running') AND json_extract(payload_json, '$.feedId') = ? LIMIT 1",
+        ).get(source.id);
+        if (active) continue;
+        const idempotencyKey = `feed_poll:${source.id}:${Math.floor(now / intervalMs)}`;
+        if (this.getJobByIdempotencyKey(idempotencyKey)) continue;
+        const id = this.newId();
+        this.database.prepare(
+          `INSERT INTO jobs (id, origin_turn_id, kind, payload_json, idempotency_key, result_json, error_code,
+             state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at)
+           VALUES (?, NULL, 'feed_poll', ?, ?, NULL, NULL, 'pending', ?, NULL, NULL, 0, ?, ?, ?)`,
+        ).run(id, encodeJson({ version: 1, feedId: source.id }, "payload"), idempotencyKey, now, maxAttempts, now, now);
+        created.push(this.getJobRequired(id));
+      }
+      return created;
+    });
+  }
+
+  recoverFeedPollJobs(): number {
+    return this.transaction(() => {
+      const now = this.currentTime();
+      return Number(this.database.prepare(
+        `UPDATE jobs SET state = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+           available_at = CASE WHEN attempts >= max_attempts THEN available_at ELSE ? END,
+           error_code = CASE WHEN attempts >= max_attempts THEN error_code ELSE 'lease_expired' END,
+           run_token = NULL, lease_expires_at = NULL, updated_at = ?
+         WHERE kind = 'feed_poll' AND state = 'running' AND lease_expires_at <= ?`,
+      ).run(now, now, now).changes);
+    });
+  }
+
+  commitFeedPoll(jobId: string, runToken: string, parsed: ParsedFeed): { feedId: string; baseline: boolean; newItems: number; totalItems: number } | null {
+    return this.transaction(() => {
+      const now = this.currentTime();
+      const job = this.getJobById(requireText(jobId, "jobId"));
+      if (!job || job.kind !== "feed_poll" || job.state !== "running" || job.runToken !== requireText(runToken, "runToken") || job.leaseExpiresAt === null || job.leaseExpiresAt <= now) return null;
+      const payload = job.payload;
+      const feedId = payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : null;
+      if (!feedId) throw new RuntimeStoreError("feed_poll job payload is invalid");
+      const source = this.getFeedSourceById(feedId);
+      if (!source) throw new RuntimeStoreError(`Feed source disappeared: ${feedId}`);
+      const baseline = source.baselineAt === null;
+      let newItems = 0;
+      if (!parsed.notModified) {
+        for (const item of parsed.items) {
+          const existing = this.database.prepare("SELECT id FROM feed_items WHERE feed_id = ? AND identity_key = ?").get(feedId, item.identityKey);
+          if (!existing) newItems++;
+          const itemId = existing ? textValue(existing, "id") : this.newId();
+          this.database.prepare(
+            `INSERT INTO feed_items
+              (id, feed_id, identity_key, canonical_url, title, summary, author, published_at, first_seen_at,
+               state, error_code, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+             ON CONFLICT(feed_id, identity_key) DO UPDATE SET canonical_url = excluded.canonical_url,
+               title = excluded.title, summary = excluded.summary, author = excluded.author,
+               published_at = excluded.published_at, error_code = NULL, updated_at = excluded.updated_at`,
+          ).run(itemId, feedId, item.identityKey, item.canonicalUrl, item.title, item.summary || null, item.author,
+            item.publishedAt, now, baseline ? "baseline" : "candidate", now, now);
+        }
+      }
+      const baselineAt = baseline && !parsed.notModified ? now : source.baselineAt;
+      this.database.prepare(
+        `UPDATE feed_sources SET etag = ?, last_modified = ?, baseline_at = ?, last_checked_at = ?,
+           last_success_at = ?, error_code = NULL, updated_at = ? WHERE id = ?`,
+      ).run(parsed.etag, parsed.lastModified, baselineAt, now, now, now, feedId);
+      const result = { feedId, baseline, newItems, totalItems: parsed.items.length };
+      const changed = this.database.prepare(
+        `UPDATE jobs SET state = 'succeeded', result_json = ?, error_code = NULL,
+           run_token = NULL, lease_expires_at = NULL, updated_at = ?
+         WHERE id = ? AND state = 'running' AND run_token = ? AND lease_expires_at > ?`,
+      ).run(encodeJson(result, "result"), now, jobId, runToken, now).changes;
+      return changed === 1 ? result : null;
+    });
+  }
+
+  recordFeedPollFailure(jobId: string, runToken: string, errorCode: string, retryable: boolean, retryAt: number): boolean {
+    requireTimestamp(retryAt, "retryAt");
+    return this.transaction(() => {
+      const now = this.currentTime();
+      const job = this.getJobById(requireText(jobId, "jobId"));
+      if (!job || job.kind !== "feed_poll" || job.state !== "running" || job.runToken !== requireText(runToken, "runToken") || job.leaseExpiresAt === null || job.leaseExpiresAt <= now) return false;
+      const payload = job.payload;
+      const feedId = payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : null;
+      if (feedId) this.database.prepare("UPDATE feed_sources SET last_checked_at = ?, error_code = ?, updated_at = ? WHERE id = ?").run(now, errorCode, now, feedId);
+      const nextState = retryable && job.attempts < job.maxAttempts ? "pending" : "failed";
+      const changed = this.database.prepare(
+        `UPDATE jobs SET state = ?, available_at = ?, error_code = ?, run_token = NULL,
+           lease_expires_at = NULL, updated_at = ?
+         WHERE id = ? AND state = 'running' AND run_token = ? AND lease_expires_at > ?`,
+      ).run(nextState, nextState === "pending" ? retryAt : job.availableAt, errorCode, now, jobId, runToken, now).changes;
+      return changed === 1;
+    });
+  }
+
+  listFeedDigestCandidates(scope: FeishuScope): DigestCandidate[] {
+    // ponytail: bounded single-user subscriptions; add a URL delivery index if history makes this scan expensive.
+    return this.database.prepare(`
+      SELECT i.*, s.display_name AS source_name, s.priority FROM feed_items i
+      JOIN feed_sources s ON s.id = i.feed_id
+      WHERE i.state = 'candidate' AND i.notified_at IS NULL AND s.enabled = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM jobs, json_each(payload_json, '$.canonicalUrls') link
+          WHERE kind = 'feed_digest' AND state = 'succeeded' AND ${DIGEST_SCOPE_SQL}
+            AND link.value = i.canonical_url
+        )
+    `).all(...this.feishuScopeParams(scope)).map(row => ({ ...feedItemFromRow(row),
+      sourceName: textValue(row, "source_name"), priority: numberValue(row, "priority") }));
+  }
+
+  ensureFeedDigestJob(scope: FeishuScope, date: string, maxItems: number): Job | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isInteger(maxItems) || maxItems < 1 || maxItems > 50) {
+      throw new TypeError("Invalid digest configuration");
+    }
+    const scopeParams = this.feishuScopeParams(scope);
+    const scopeKey = createHash("sha256").update(JSON.stringify(scopeParams)).digest("hex");
+    const key = `feed_digest:${scopeKey}:${date}`;
+    return this.transaction(() => {
+      if (this.getJobByIdempotencyKey(key)) return null;
+      // Freeze and finish one delivery before preparing another day's batch.
+      if (this.database.prepare(`SELECT 1 FROM jobs WHERE kind = 'feed_digest'
+          AND state IN ('pending', 'running') AND ${DIGEST_SCOPE_SQL} LIMIT 1`).get(...scopeParams)) return null;
+      const digest = buildFeedDigest(this.listFeedDigestCandidates(scope), date, maxItems);
+      if (!digest) return null;
+      const id = this.newId(), now = this.currentTime();
+      const payload: DigestPayload = { version: 1, scope: { appId: scope.appId, tenantKey: scope.tenantKey,
+        ownerOpenId: scope.ownerOpenId }, date, ...digest };
+      this.database.prepare(`INSERT INTO jobs (id, origin_turn_id, kind, payload_json, idempotency_key,
+        result_json, error_code, state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at)
+        VALUES (?, NULL, 'feed_digest', ?, ?, NULL, NULL, 'pending', ?, NULL, NULL, 0, 3, ?, ?)`)
+        .run(id, encodeJson(payload, "payload"), key, now, now, now);
+      return this.getJobRequired(id);
+    });
+  }
+
+  recoverFeedDigestJobs(scope: FeishuScope): number {
+    return this.transaction(() => {
+      const now = this.currentTime();
+      return Number(this.database.prepare(`UPDATE jobs SET
+        state = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+        available_at = CASE WHEN attempts >= max_attempts THEN available_at ELSE ? END,
+        error_code = 'lease_expired', run_token = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE kind = 'feed_digest' AND state = 'running' AND lease_expires_at <= ? AND ${DIGEST_SCOPE_SQL}`)
+        .run(now, now, now, ...this.feishuScopeParams(scope)).changes);
+    });
+  }
+
+  commitFeedDigest(jobId: string, runToken: string, scope: FeishuScope, messageId: string): boolean {
+    requireText(messageId, "messageId");
+    return this.transaction(() => {
+      const now = this.currentTime();
+      const row = this.database.prepare(`SELECT * FROM jobs WHERE id = ? AND kind = 'feed_digest'
+        AND state = 'running' AND run_token = ? AND lease_expires_at > ? AND ${DIGEST_SCOPE_SQL}`)
+        .get(jobId, runToken, now, ...this.feishuScopeParams(scope));
+      if (!row) return false;
+      const payload = jobFromRow(row).payload as DigestPayload;
+      for (const id of payload.itemIds) {
+        this.database.prepare("UPDATE feed_items SET notified_at = ?, updated_at = ? WHERE id = ? AND state = 'candidate' AND notified_at IS NULL")
+          .run(now, now, id);
+      }
+      this.database.prepare(`UPDATE jobs SET state = 'succeeded', result_json = ?, error_code = NULL,
+        run_token = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?`)
+        .run(encodeJson({ messageId }, "result"), now, jobId);
+      return true;
     });
   }
 
@@ -881,6 +1134,18 @@ export class RuntimeStore {
   private getJobByIdempotencyKey(idempotencyKey: string): Job | null {
     const row = this.database.prepare("SELECT * FROM jobs WHERE idempotency_key = ?").get(idempotencyKey);
     return row ? jobFromRow(row) : null;
+  }
+
+  private listFeedSourcesInternal(enabledOnly: boolean): FeedSource[] {
+    const rows = this.database.prepare(
+      `SELECT * FROM feed_sources ${enabledOnly ? "WHERE enabled = 1" : ""} ORDER BY priority, id`,
+    ).iterate();
+    return [...rows].map(row => feedSourceFromRow(row));
+  }
+
+  private getFeedSourceById(id: string): FeedSource | null {
+    const row = this.database.prepare("SELECT * FROM feed_sources WHERE id = ?").get(id);
+    return row ? feedSourceFromRow(row) : null;
   }
 
   private getOutboxById(id: string): Outbox | null {

@@ -18,9 +18,10 @@ Knowledge Radar 希望把“看到一篇好文章”到“留下可回顾的笔�
 - **文章摘要** — 自动提取正文，生成摘要和核心要点。
 - **围绕文章讨论** — 根据最近的文章摘要继续追问，采集期间也能正常聊天。
 - **Markdown 归档** — 以可读标题命名文件，保存来源与时间，接入已有知识库。
+- **技术订阅** — 轮询 RSS / Atom 来源，建立首次基线，去重新增文章，并按日发送飞书摘要。
 - **自托管部署** — 单个 Docker 应用容器，SQLite 保存运行状态，无需独立数据库服务。
 
-> 当前为早期版本，支持单用户飞书私聊和公开文章采集。订阅、登录态浏览和可视化页面仍在计划中。
+> 当前为早期版本，支持单用户飞书私聊、公开文章采集和 RSS / Atom 每日摘要。登录态浏览和可视化页面仍在计划中。
 
 ## 使用示例
 
@@ -76,7 +77,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml -f compose.feish
 - [x] 飞书私聊与公开文章采集
 - [x] 摘要追问与 Markdown 归档
 - [ ] 简化部署与发布预构建镜像
-- [ ] RSS / Atom 订阅与定时提醒
+- [x] RSS / Atom 订阅与飞书每日摘要
 - [ ] 人工协助的登录态浏览与话题管理
 - [ ] 可视化管理页面
 
@@ -87,6 +88,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml -f compose.feish
 - [架构与技术选型](docs/technology-selection.md) — 技术路线与设计取舍
 - [会话与任务运行时](docs/conversation-runtime.md) — 持久化、重试与恢复机制
 - [验收记录](docs/url-capture-verification.md) — 已验证范围与待完成项
+- [RSS / Atom ingestion](docs/feed-ingestion.md) — 可选来源配置、基线、轮询状态与 Compose overlay
 
 技术栈：**TypeScript · Node.js · Pi · Playwright · SQLite**。
 

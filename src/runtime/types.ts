@@ -54,6 +54,40 @@ export type Job = {
   updatedAt: number;
 };
 
+export type FeedSource = {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  priority: number;
+  tags: string[];
+  etag: string | null;
+  lastModified: string | null;
+  baselineAt: number | null;
+  lastCheckedAt: number | null;
+  lastSuccessAt: number | null;
+  errorCode: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type FeedItem = {
+  id: string;
+  feedId: string;
+  identityKey: string;
+  canonicalUrl: string | null;
+  title: string;
+  summary: string | null;
+  author: string | null;
+  publishedAt: number | null;
+  firstSeenAt: number;
+  state: "baseline" | "candidate";
+  notifiedAt: number | null;
+  errorCode: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type Outbox = {
   id: string;
   turnId: string;

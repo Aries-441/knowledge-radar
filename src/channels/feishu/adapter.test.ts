@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { WSClient, EventDispatcher, defaultHttpInstance } from "@larksuiteoapi/node-sdk";
-import { classifyFeishuError, createFeishuTransport, feishuReplyRequest, FeishuError, parseFeishuText,
+import { classifyFeishuError, createFeishuTransport, feishuReplyRequest, feishuTextRequest, FeishuError, parseFeishuText,
   quietSdkLogger, readFeishuConfig, receiveFeishuEvent, type FeishuConfig } from "./adapter.js";
 import type { Outbox } from "../../runtime/types.js";
 
@@ -132,6 +132,26 @@ test("real SDK sends one token request and one reply, and rejects business failu
   body = { code: 0, data: {} };
   await assert.rejects(transport.send("om_original", outbox()), FeishuError);
   assert.equal(requests.length, 4); // cache reused; no hidden message retry
+  transport.close();
+});
+
+test("real SDK sends a proactive text to an open_id with a stable UUID", async () => {
+  const requests: { url?: string; body: unknown }[] = [];
+  const http = defaultHttpInstance.create({ adapter: async request => {
+    requests.push({ url: request.url, body: JSON.parse(request.data ?? "{}") });
+    return { config: request, headers: {}, status: 200, statusText: "OK",
+      data: request.url?.includes("tenant_access_token") ? { code: 0, tenant_access_token: "fake-token", expire: 7200 }
+        : { code: 0, data: { message_id: "om_digest" } } };
+  } });
+  const isolated = { ...config, appId: "cli_" + randomUUID().replaceAll("-", "").slice(0, 16) };
+  const transport = createFeishuTransport(isolated, () => {}, () => assert.fail(), { http, makeWs: noWs });
+  const request = feishuTextRequest("ou_owner", "digest", "a".repeat(40));
+  assert.deepEqual(request.data, { receive_id: "ou_owner", msg_type: "text", content: '{"text":"digest"}', uuid: "a".repeat(40) });
+  const result = await transport.sendText!("ou_owner", "digest", "a".repeat(40));
+  assert.deepEqual(result, { messageId: "om_digest" });
+  assert.ok(requests[1].url?.endsWith("/messages"));
+  assert.deepEqual(requests[1].body, request.data);
+  await assert.rejects(transport.sendText!("", "digest", "a".repeat(40)), FeishuError);
   transport.close();
 });
 
