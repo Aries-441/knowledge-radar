@@ -34,6 +34,14 @@ npm ci
 node --env-file=.env --import tsx src/cli.ts serve-feishu
 ```
 
+For a read-only daily digest check, run:
+
+```powershell
+node --env-file=.env --import tsx src/cli.ts preview-feed-digest
+```
+
+The preview sends a Feishu Card 2.0 to `FEISHU_ALLOWED_OPEN_ID`, prints the accepted message ID, and leaves feed jobs, poll state, and `notified_at` unchanged. The bot must have `im:message:send_as_bot`.
+
 Ctrl+C 停止；普通 npm start 不自动加载 .env。
 
 Docker：
@@ -46,7 +54,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml stop
 
 此文件可独立使用，不要叠加文章采集的 compose.yaml。非 root 用户运行，无监听端口；命名卷挂到 /var/lib/knowledge-radar，数据库固定为其下 radar.db。密钥通过环境变量注入，不会进入镜像，但本机有 Docker 管理权限的人仍可读取容器配置。
 
-每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v5，旧代码拒绝 v5；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
+每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v6，旧代码拒绝 v6；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
 
 ### 开启公开文章采集
 

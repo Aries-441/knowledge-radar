@@ -7,11 +7,13 @@ export type FeishuConfig = FeishuScope & { appSecret: string; statePath: string;
 export type SafeLog = (record: { event: string; [key: string]: string | number | undefined }) => void;
 export type FeishuSend = (messageId: string, outbox: Outbox) => Promise<void>;
 export type FeishuSendText = (receiveId: string, text: string, uuid: string) => Promise<{ messageId: string }>;
+export type FeishuSendInteractive = (receiveId: string, card: string, uuid: string) => Promise<{ messageId: string }>;
 export type FeishuTransport = {
   start: (receive: (event: unknown) => Promise<void>) => Promise<void>;
   close: () => void;
   send: FeishuSend;
   sendText?: FeishuSendText;
+  sendInteractive?: FeishuSendInteractive;
 };
 
 export class FeishuError extends Error {
@@ -85,6 +87,25 @@ export function feishuTextRequest(receiveId: string, text: string, uuid: string)
   if (Buffer.byteLength(content, "utf8") > 20_000) throw new FeishuError("feishu_payload_too_large", true);
   return { params: { receive_id_type: "open_id" as const }, data: {
     receive_id: receiveId, msg_type: "text", content, uuid,
+  } };
+}
+
+export function feishuInteractiveRequest(receiveId: string, card: string, uuid: string) {
+  if (!nonempty(receiveId) || !nonempty(card) || !/^[a-f0-9]{40}$/.test(uuid)) {
+    throw new FeishuError("feishu_invalid_payload", true);
+  }
+  try {
+    const parsed = JSON.parse(card);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.schema !== "2.0") {
+      throw new FeishuError("feishu_invalid_payload", true);
+    }
+  } catch (error) {
+    if (error instanceof FeishuError) throw error;
+    throw new FeishuError("feishu_invalid_payload", true);
+  }
+  if (Buffer.byteLength(card, "utf8") > 20_000) throw new FeishuError("feishu_payload_too_large", true);
+  return { params: { receive_id_type: "open_id" as const }, data: {
+    receive_id: receiveId, msg_type: "interactive", content: card, uuid,
   } };
 }
 
@@ -169,6 +190,18 @@ export function createFeishuTransport(
     },
     async sendText(receiveId, text, uuid) {
       const request = feishuTextRequest(receiveId, text, uuid);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), options.sendTimeoutMs ?? 10_000);
+      try {
+        const response = await deadline.run(controller.signal, () => client.im.message.create(request));
+        if (response.code !== 0 || !nonempty(response.data?.message_id)) throw classifyFeishuError(response);
+        return { messageId: response.data.message_id };
+      } catch (error) {
+        throw controller.signal.aborted ? new FeishuError("feishu_timeout") : classifyFeishuError(error);
+      } finally { clearTimeout(timer); }
+    },
+    async sendInteractive(receiveId, card, uuid) {
+      const request = feishuInteractiveRequest(receiveId, card, uuid);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), options.sendTimeoutMs ?? 10_000);
       try {

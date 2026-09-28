@@ -2,12 +2,12 @@
 
 > 当前代码（2026-09-10）：公开文章 CLI 使用 `compose.yaml`；飞书纯聊天使用 `compose.feishu.yaml`，文章采集显式叠加 `compose.feishu.capture.yaml`。仍是一个非 root 容器内的 Turn/Job/Outbox 三循环，Playwright 由程序调用，不给模型工具。操作步骤见 [飞书接入](feishu.md)，真实部署和验收状态见 [验收记录](url-capture-verification.md)。下文多服务、secrets、登录、健康检查及进一步加固仍为未来目标，不是当前能力。
 
-## 0. 当前 v5 部署边界
+## 0. 当前 v6 部署边界
 
 - 状态库为 named volume 下的 `/var/lib/knowledge-radar/radar.db`；可选归档为专用宿主目录 → `/app/archive`，不是下文未来拓扑中的 `/data/archive`。
 - 基础飞书配置不挂归档且清空归档环境变量。override 要求非空 `_HOST` 变量和已存在目录；配置或发布能力不满足则拒绝采集，聊天仍可用。Linux 按容器 UID 1001 配置目录写权限，不 chmod 777、不切 root。
 - `stop_grace_period: 100s`，应用三循环合计排空 85 秒；采集工作/清理共 80 秒。采集 override 设置 `shm_size: 1gb`，不开放入站端口、不给 Docker socket。
-- 升级前停止本项目服务并做一致性 SQLite 备份；数据库与 Markdown 分别保存。v4 到 v5 原子迁移，不重分类旧 URL；旧程序拒绝 v5。回滚同时恢复旧代码与迁移前库，保留新 Markdown 待核对，提醒备份之后的去重记录丢失可能造成重复。
+- 升级前停止本项目服务并做一致性 SQLite 备份；数据库与 Markdown 分别保存。v5 到 v6 原子迁移，为 `feed_sources` 增加 connector 类型和配置，不重分类旧 URL；旧程序拒绝 v6。回滚同时恢复旧代码与迁移前库，保留新 Markdown 待核对，提醒备份之后的去重记录丢失可能造成重复。
 - 重建必须保持同一 Compose project、状态卷及归档目录。不要 `down -v`。不要在尚有待恢复检查点时静默改归档根。
 - `.env` 仅本机存放。自定义 env 同时设置 Compose `--env-file` 插值来源和 `RADAR_ENV_FILE` 服务注入来源，示例见飞书指引。容器管理员仍能读取注入的密钥。
 - 当前协议/凭据/显式本地地址与子请求限制，不等同完整 DNS 重绑定防护；同容器浏览器漏洞仍可能影响挂入的目录，不能把容器隔离视为绝对安全。
@@ -248,4 +248,4 @@ Docker Desktop 必须在用户登录后运行，Compose 的 restart policy 才�
 
 ## RSS / Atom overlay
 
-Feed polling and the optional daily Feishu digest are opt in. Keep the base Feishu compose files unchanged and add compose.feeds.yaml only when a local YAML file is ready. Set KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST to that file, mount it read only, and restart after edits. Set `digest.enabled: true` in the YAML to send the daily digest; the bot also needs `im:message:send_as_bot`. The feed worker and digest worker use the existing radar-state volume; do not run down -v during a feed migration. See [feed-ingestion.md](feed-ingestion.md) for configuration and rollback.
+Feed polling and the optional daily Feishu digest are opt in. Keep the base Feishu compose files unchanged and add compose.feeds.yaml only when a local YAML file is ready. Set KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST to that file, mount it read only, and restart after edits. Set `digest.enabled: true` in the YAML to send the daily Card 2.0 digest; the bot also needs `im:message:send_as_bot`. To inspect the current batch without consuming it, run `node --env-file=.env --import tsx src/cli.ts preview-feed-digest` from the checkout. The preview sends to `FEISHU_ALLOWED_OPEN_ID` and does not create a Job or alter candidate state. The feed worker and digest worker use the existing radar-state volume; do not run down -v during a feed migration. See [feed-ingestion.md](feed-ingestion.md) for `sources`, connector registry behavior and schema v6 rollback.

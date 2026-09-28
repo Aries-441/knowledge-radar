@@ -15,12 +15,24 @@ import {
 const goodFeed = { id: "sample", name: "Sample", url: "https://example.com/feed.xml" };
 
 test("uses safe defaults for omitted global and per-feed optional fields", () => {
+  const expectedSource = { ...goodFeed, kind: "rss", connectorConfig: {}, enabled: true, priority: 0, tags: [], itemLimit: DEFAULT_FEED_ITEM_LIMIT };
   assert.deepEqual(parseFeedConfig({ feeds: [goodFeed] }), {
     timezone: DEFAULT_FEED_TIMEZONE,
     pollIntervalMinutes: DEFAULT_POLL_INTERVAL_MINUTES,
-    feeds: [{ ...goodFeed, enabled: true, priority: 0, tags: [], itemLimit: DEFAULT_FEED_ITEM_LIMIT }],
+    sources: [expectedSource],
+    feeds: [expectedSource],
   });
-  assert.deepEqual(parseFeedConfig({}).feeds, []);
+  assert.deepEqual(parseFeedConfig({}).sources, []);
+});
+
+test("normalizes the sources entry and rejects ambiguous or unsupported connector configuration", () => {
+  const config = parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss" }] });
+  assert.equal(config.sources[0]?.kind, "rss");
+  assert.deepEqual(config.sources[0]?.connectorConfig, {});
+  assert.strictEqual(config.feeds, config.sources);
+  assert.throws(() => parseFeedConfig({ feeds: [goodFeed], sources: [{ ...goodFeed, kind: "rss" }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ ...goodFeed, kind: "github" }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss", connectorConfig: { tokenEnv: "TOKEN" } }] }), FeedConfigError);
 });
 
 test("parses optional daily digest configuration and validates its bounds", () => {

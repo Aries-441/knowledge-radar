@@ -1,5 +1,15 @@
 # Knowledge Radar
 
+## Feed digest preview
+
+After configuring `KNOWLEDGE_RADAR_FEEDS_CONFIG`, inspect the current unread batch without creating a digest job or marking articles as notified:
+
+```powershell
+node --env-file=.env --import tsx src/cli.ts preview-feed-digest
+```
+
+The command sends a Card 2.0 preview to `FEISHU_ALLOWED_OPEN_ID`. It returns `sent` with the Feishu message ID, or `empty` when there are no candidates. The bot needs `im:message:send_as_bot`.
+
 **通过飞书收集、总结和讨论文章的自托管 AI 知识收件箱。**
 
 把手机上发现的好文章发送给机器人，获取摘要与要点，继续追问，并将结果保存到自己的 Markdown 知识库。
@@ -18,7 +28,7 @@ Knowledge Radar 希望把“看到一篇好文章”到“留下可回顾的笔�
 - **文章摘要** — 自动提取正文，生成摘要和核心要点。
 - **围绕文章讨论** — 根据最近的文章摘要继续追问，采集期间也能正常聊天。
 - **Markdown 归档** — 以可读标题命名文件，保存来源与时间，接入已有知识库。
-- **技术订阅** — 轮询 RSS / Atom 来源，建立首次基线，去重新增文章，并按日发送飞书摘要。
+- **技术订阅** — 通过显式 RSS / Atom connector registry 轮询来源，建立首次基线，去重新增文章，并按日发送飞书摘要；GitHub、微信公众号、Newsletter 和 arXiv connector 将复用同一来源边界逐步接入。
 - **自托管部署** — 单个 Docker 应用容器，SQLite 保存运行状态，无需独立数据库服务。
 
 > 当前为早期版本，支持单用户飞书私聊、公开文章采集和 RSS / Atom 每日摘要。登录态浏览和可视化页面仍在计划中。
@@ -88,7 +98,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml -f compose.feish
 - [架构与技术选型](docs/technology-selection.md) — 技术路线与设计取舍
 - [会话与任务运行时](docs/conversation-runtime.md) — 持久化、重试与恢复机制
 - [验收记录](docs/url-capture-verification.md) — 已验证范围与待完成项
-- [RSS / Atom ingestion](docs/feed-ingestion.md) — 可选来源配置、基线、轮询状态与 Compose overlay
+- [Source ingestion](docs/feed-ingestion.md) — `sources` 配置、RSS connector registry、基线、轮询状态与 Compose overlay
 
 技术栈：**TypeScript · Node.js · Pi · Playwright · SQLite**。
 

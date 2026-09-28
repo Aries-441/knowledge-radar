@@ -1,5 +1,6 @@
 import type { FeedConfig } from "./config.js";
-import { fetchFeed, FeedFetchError, type FeedFetchOptions } from "./parser.js";
+import { FeedFetchError, type FeedFetchOptions } from "./parser.js";
+import { getSourceConnector, SourceConnectorError } from "./source.js";
 import type { RuntimeStore } from "../runtime/store.js";
 
 export type FeedWorkerLog = (record: { event: string; [key: string]: string | number | undefined }) => void;
@@ -17,12 +18,14 @@ export async function processFeedPollOnce({ store, config, now = Date.now, log =
   if (!job) return { outcome: "idle" };
   const token = job.runToken!;
   const payload = job.payload;
-  const feedId = payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : undefined;
+  const feedId = payload && typeof payload === "object" && "sourceId" in payload && typeof payload.sourceId === "string"
+    ? payload.sourceId
+    : payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : undefined;
   if (!feedId) {
     const changed = store.recordFeedPollFailure(job.id, token, "feed_payload_invalid", false, now());
     return { outcome: changed ? "failed" : "lost_lease", jobId: job.id };
   }
-  const source = store.getFeedSource(feedId);
+  const source = store.getSource(feedId);
   if (!source) {
     const changed = store.recordFeedPollFailure(job.id, token, "feed_source_missing", false, now());
     log({ event: "feed_poll", feed_id: feedId, phase: "lookup", outcome: changed ? "failed" : "lost_lease", error_code: "feed_source_missing" });
@@ -30,12 +33,9 @@ export async function processFeedPollOnce({ store, config, now = Date.now, log =
   }
   log({ event: "feed_poll", feed_id: feedId, phase: "fetch", outcome: "started" });
   try {
-    const parsed = await fetchFeed(source.url, { etag: source.etag, lastModified: source.lastModified }, {
-      ...fetchOptions,
-      sourceId: feedId,
-      signal,
-    });
-    const configured = config.feeds.find(feed => feed.id === feedId);
+    const connector = getSourceConnector(source.kind);
+    const parsed = await connector.fetch(source, { fetchOptions, signal });
+    const configured = config.sources.find(feed => feed.id === feedId);
     const limited = configured && parsed.items.length > configured.itemLimit
       ? { ...parsed, items: parsed.items.slice(0, configured.itemLimit) }
       : parsed;
@@ -45,7 +45,7 @@ export async function processFeedPollOnce({ store, config, now = Date.now, log =
     return { outcome, jobId: job.id };
   } catch (error) {
     if (signal?.aborted) throw error;
-    const failure = error instanceof FeedFetchError
+    const failure = error instanceof FeedFetchError || error instanceof SourceConnectorError
       ? error
       : new FeedFetchError("feed_unavailable", true);
     const retryAt = now() + (failure.retryable ? Math.max(30_000, Math.min(15 * 60_000, 30_000 * 2 ** Math.max(0, job.attempts - 1))) : 0);

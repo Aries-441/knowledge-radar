@@ -33,11 +33,11 @@ function createV3Database(): DatabaseSync {
   return database;
 }
 
-test("v3 to v5 migration preserves rows, creates feed schema, and is idempotent", () => {
+test("v3 to v6 migration preserves rows, creates connector columns, and is idempotent", () => {
   const database = createV3Database();
   try {
     migrateRuntimeSchema(database, (operation) => transaction(database, operation));
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 5);
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 6);
     for (const table of ["conversations", "turns", "jobs", "outbox", "article_captures"]) {
       const count = database.prepare(`SELECT count(*) AS count FROM ${table}`).get()?.count;
       assert.equal(count, 1, `${table} row should survive`);
@@ -45,11 +45,14 @@ test("v3 to v5 migration preserves rows, creates feed schema, and is idempotent"
     for (const table of ["feed_sources", "feed_items"]) {
       assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
     }
+    const columns = database.prepare("PRAGMA table_info(feed_sources)").all().map(row => row.name);
+    assert.ok(columns.includes("kind"));
+    assert.ok(columns.includes("connector_config_json"));
     for (const index of ["feed_sources_enabled_priority_index", "feed_items_feed_state_first_seen_index", "feed_items_published_index", "feed_items_unnotified_index"]) {
       assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get(index));
     }
     migrateRuntimeSchema(database, (operation) => transaction(database, operation));
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 5);
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 6);
     assert.equal(database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE name LIKE 'feed_%'").get()?.count, 6);
   } finally {
     database.close();

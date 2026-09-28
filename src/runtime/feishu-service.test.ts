@@ -56,7 +56,7 @@ test("v1 upgrade preserves original queues; failed migration rolls back and v2 r
   assert.equal(f.db.prepare("SELECT name FROM sqlite_master WHERE name = 'feishu_chats'").get(), undefined);
   f.db.exec("DROP TABLE feishu_inbound_messages");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 5);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 6);
   assert.deepEqual(f.store.getTurn(turn.id), running);
   assert.deepEqual(f.store.getOutbox(outbox.id), sending);
   assert.deepEqual(f.store.getJob(job.id), job);

@@ -18,6 +18,20 @@ process.exitCode = await runCli(process.argv.slice(2), {
       process.removeListener("SIGTERM", stop);
     }
   },
+  previewFeedDigest: async (config, feedConfig) => {
+    const { createFeishuTransport, FeishuError } = await import("./channels/feishu/adapter.js");
+    const { previewFeedDigestOnce } = await import("./feed/digest-preview.js");
+    const { openRuntimeStore } = await import("./runtime/store.js");
+    const store = openRuntimeStore({ path: config.statePath });
+    const transport = createFeishuTransport(config, entry => console.error(JSON.stringify(entry)), () => {});
+    try {
+      if (!transport.sendInteractive) throw new FeishuError("feishu_configuration", true);
+      return await previewFeedDigestOnce({ store, config: feedConfig, scope: config, send: transport.sendInteractive });
+    } finally {
+      transport.close();
+      store.close();
+    }
+  },
   agent: async (request) => {
     const { replyWithPi } = await import("./agent/topic-runtime.js");
     return replyWithPi(request);

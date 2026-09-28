@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildFeedDigest, digestLocalTime, DIGEST_MAX_BYTES, type DigestCandidate } from "./digest.js";
+import { buildFeedDigest, buildFeedDigestCard, digestLocalTime, DIGEST_CARD_MAX_BYTES, DIGEST_MAX_BYTES, type DigestCandidate } from "./digest.js";
 
 function item(overrides: Partial<DigestCandidate> = {}): DigestCandidate {
   return { id: "item", feedId: "feed", identityKey: "id:item", canonicalUrl: "https://example.com/item",
@@ -30,4 +30,32 @@ test("digest enforces item and byte limits without losing unselected IDs", () =>
   assert.ok(result);
   assert.equal(result.itemIds.length, 2);
   assert.ok(Buffer.byteLength(result.text, "utf8") <= DIGEST_MAX_BYTES);
+});
+
+test("card digest contains a preview marker, article metadata, and open-url behavior", () => {
+  const result = buildFeedDigestCard([item({ id: "card-1", title: "A <strong>title</strong>", summary: "A summary", sourceName: "Source" })], "2026-09-24", 10);
+  assert.ok(result);
+  const card = JSON.parse(result.card) as { schema: string; header: { title: { content: string } }; body: { elements: Array<Record<string, any>> } };
+  assert.equal(card.schema, "2.0");
+  assert.match(card.header.title.content, /预览/);
+  assert.ok(card.body.elements.some(element => element.tag === "markdown" && String(element.content).includes("title")));
+  assert.ok(card.body.elements.some(element => element.tag === "button" && element.behaviors?.[0]?.type === "open_url"));
+  assert.ok(Buffer.byteLength(result.card, "utf8") <= DIGEST_CARD_MAX_BYTES);
+  assert.ok(Buffer.byteLength(result.text, "utf8") <= DIGEST_MAX_BYTES);
+});
+
+test("card digest keeps shared ordering and truncates before the byte limit", () => {
+  const items = Array.from({ length: 20 }, (_, index) => item({
+    id: `card-${index}`,
+    identityKey: `card:${index}`,
+    canonicalUrl: `https://example.com/card/${index}`,
+    title: "x".repeat(500),
+    summary: "y".repeat(900),
+    publishedAt: 20_000 - index,
+  }));
+  const result = buildFeedDigestCard(items, "2026-09-24", 20);
+  assert.ok(result);
+  assert.deepEqual(result.itemIds.slice(0, 2), ["card-0", "card-1"]);
+  assert.ok(result.itemIds.length < items.length);
+  assert.ok(Buffer.byteLength(result.card, "utf8") <= DIGEST_CARD_MAX_BYTES);
 });

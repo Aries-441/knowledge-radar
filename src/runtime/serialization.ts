@@ -54,9 +54,14 @@ export function feedSourceFromRow(row: Record<string, unknown>): FeedSource {
   let tags: unknown;
   try { tags = JSON.parse(textValue(row, "tags_json")); } catch { throw new RuntimeStoreError("Feed tags contain invalid JSON"); }
   if (!Array.isArray(tags) || tags.some(tag => typeof tag !== "string")) throw new RuntimeStoreError("Feed tags are invalid");
+  let connectorConfig: unknown;
+  try { connectorConfig = JSON.parse(textValue(row, "connector_config_json")); } catch { throw new RuntimeStoreError("Source connector config contains invalid JSON"); }
+  if (!connectorConfig || typeof connectorConfig !== "object" || Array.isArray(connectorConfig)) throw new RuntimeStoreError("Source connector config is invalid");
   return {
     id: textValue(row, "id"),
     name: textValue(row, "display_name"),
+    kind: textValue(row, "kind"),
+    connectorConfig: connectorConfig as Record<string, unknown>,
     url: textValue(row, "url"),
     enabled: numberValue(row, "enabled") === 1,
     priority: numberValue(row, "priority"),

@@ -25,11 +25,37 @@ test("syncs sources without resetting cache state and only schedules enabled sou
     const jobs = store.ensureFeedPollJobs(60_000);
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].kind, "feed_poll");
+    assert.deepEqual(jobs[0].payload, { version: 2, sourceId: "one", feedId: "one" });
+    assert.equal(store.getSource("one")?.kind, "rss");
+    assert.deepEqual(store.getSource("one")?.connectorConfig, {});
     store.syncFeedSources([{ ...feeds[0], name: "Renamed", tags: ["b"] }, feeds[1]]);
     assert.equal(store.getFeedSource("one")?.etag, null);
     assert.equal(store.getFeedSource("one")?.name, "Renamed");
     assert.equal(store.claimJob(100, "capture_article"), null);
     assert.equal(store.claimJob(100, "feed_poll")?.kind, "feed_poll");
+  } finally { store.close(); }
+});
+
+test("source kind changes reset connector cache, baseline and items while omitted sources are disabled", () => {
+  const { store } = setup();
+  try {
+    const source = { ...feeds[0], kind: "rss" as const, connectorConfig: {} };
+    store.syncSources([source]);
+    const job = store.ensureFeedPollJobs(60_000)[0];
+    const claim = store.claimJob(10_000, "feed_poll")!;
+    store.commitFeedPoll(job.id, claim.runToken!, parsed([{ identityKey: "id:a", canonicalUrl: "https://example.com/a", title: "A", summary: "A", author: null, publishedAt: 1 }]));
+    assert.equal(store.getSource("one")?.baselineAt, 1_000);
+
+    const database = (store as unknown as { database: { prepare(sql: string): { run(...values: unknown[]): unknown } } }).database;
+    database.prepare("UPDATE feed_sources SET kind = 'retired', connector_config_json = '{\"version\":1}' WHERE id = 'one'").run();
+    store.syncSources([source]);
+    assert.equal(store.getSource("one")?.kind, "rss");
+    assert.equal(store.getSource("one")?.baselineAt, null);
+    assert.equal(store.getSource("one")?.etag, null);
+    assert.deepEqual(store.listFeedItems("one"), []);
+
+    store.syncSources([{ ...source, enabled: false }]);
+    assert.deepEqual(store.listSources(true), []);
   } finally { store.close(); }
 });
 
@@ -84,5 +110,17 @@ test("feed failure retry and lease recovery are fenced by token", () => {
     assert.equal(store.recordFeedPollFailure(job.id, "old-token", "feed_timeout", true, clock.now + 60_000), false);
     assert.equal(store.recordFeedPollFailure(job.id, recovered.runToken!, "feed_timeout", true, clock.now + 60_000), true);
     assert.equal(store.getJob(job.id)?.state, "pending");
+  } finally { store.close(); }
+});
+
+test("commit accepts legacy feedId payloads without creating a second source", () => {
+  const { store } = setup();
+  try {
+    store.syncFeedSources([feeds[0]]);
+    const job = store.enqueueJob({ kind: "feed_poll", payload: { version: 1, feedId: "one" }, idempotencyKey: "legacy-feed-poll", maxAttempts: 2 });
+    const claim = store.claimJob(10_000, "feed_poll")!;
+    const result = store.commitFeedPoll(job.id, claim.runToken!, parsed([{ identityKey: "id:legacy", canonicalUrl: null, title: "Legacy", summary: "", author: null, publishedAt: null }]));
+    assert.equal(result?.feedId, "one");
+    assert.deepEqual(store.listFeedSources().map(source => source.id), ["one"]);
   } finally { store.close(); }
 });

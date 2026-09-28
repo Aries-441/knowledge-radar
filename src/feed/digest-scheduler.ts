@@ -7,7 +7,7 @@ export function scheduleFeedDigestOnce({ store, config, scope, now = Date.now }:
   store: RuntimeStore; config: FeedConfig; scope: FeishuScope; now?: () => number;
 }): boolean {
   const digest = config.digest;
-  if (!digest?.enabled || !config.feeds.some(feed => feed.enabled)) return false;
+  if (!digest?.enabled || !config.sources.some(source => source.enabled)) return false;
   const local = digestLocalTime(now(), config.timezone);
   if (local.time < digest.time) return false;
   return Boolean(store.ensureFeedDigestJob(scope, local.date, digest.maxItems));

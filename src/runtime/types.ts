@@ -57,6 +57,8 @@ export type Job = {
 export type FeedSource = {
   id: string;
   name: string;
+  kind: string;
+  connectorConfig: Record<string, unknown>;
   url: string;
   enabled: boolean;
   priority: number;

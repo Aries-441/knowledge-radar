@@ -37,10 +37,12 @@ test("service runs the digest loop and sends the proactive message", async () =>
     feedConfig, agent: async () => ({ text: "unused" }), signal: controller.signal, log: () => {}, now: () => clock.now,
     openStore: () => store, probeArchive: async () => false, wait: signal => delay(2, undefined, { signal }).catch(() => {}),
     createTransport: () => ({ start: async () => {}, close() {}, send: async () => {},
-      sendText: async (_receiveId, text) => { sent.push(text); return { messageId: "om_digest" }; } }),
+      sendText: async (_receiveId, text) => { sent.push(text); return { messageId: "om_digest_text" }; },
+      sendInteractive: async (_receiveId, card) => { sent.push(card); return { messageId: "om_digest" }; } }),
   });
   try {
     await eventually(() => sent.length === 1);
+    assert.match(sent[0], /"schema":"2.0"/);
     assert.match(sent[0], /New/);
     assert.ok(store.listFeedItems("one").some(item => item.identityKey === "id:new" && item.notifiedAt !== null));
   } finally {

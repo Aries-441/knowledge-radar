@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { numberValue } from "./serialization.js";
 import { RuntimeStoreError } from "./types.js";
 
-const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(operation: () => T) => T): void {
   transaction(() => {
@@ -164,6 +164,15 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
         CREATE INDEX IF NOT EXISTS feed_items_unnotified_index ON feed_items(state, notified_at, feed_id);
         PRAGMA user_version = 5;
       `);
+    }
+    if (current < 6) {
+      if (!database.prepare("PRAGMA table_info(feed_sources)").all().some(row => row.name === "kind")) {
+        database.exec("ALTER TABLE feed_sources ADD COLUMN kind TEXT NOT NULL DEFAULT 'rss'");
+      }
+      if (!database.prepare("PRAGMA table_info(feed_sources)").all().some(row => row.name === "connector_config_json")) {
+        database.exec("ALTER TABLE feed_sources ADD COLUMN connector_config_json TEXT NOT NULL DEFAULT '{}'");
+      }
+      database.exec("PRAGMA user_version = 6");
     }
   });
 }

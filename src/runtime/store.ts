@@ -5,7 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { classifyCaptureRequest } from "../article/request.js";
 import { validateCheckpoint, displayTitle, type CaptureCheckpoint } from "../article/durable-archive.js";
 import { captureFailureText, captureReasons, type CaptureErrorCode } from "../article/capture-error.js";
-import type { FeedSourceConfig } from "../feed/config.js";
+import { normalizeSourceConfig, type FeedSourceConfig } from "../feed/config.js";
+import type { SourceConfig } from "../feed/source.js";
 import type { ParsedFeed } from "../feed/parser.js";
 import { buildFeedDigest, type DigestCandidate, type DigestPayload } from "../feed/digest.js";
 import type { CaptureContext } from "./types.js";
@@ -45,6 +46,14 @@ import {
   type FeishuText,
   type FeishuAcceptance,
 } from "./types.js";
+
+function sourceIdFromPollPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  if (typeof record.sourceId === "string") return record.sourceId;
+  if (typeof record.feedId === "string") return record.feedId;
+  return null;
+}
 
 export { RuntimeStoreError, StorageBusyError } from "./types.js";
 export type {
@@ -269,34 +278,40 @@ export class RuntimeStore {
     });
   }
 
-  syncFeedSources(feeds: FeedSourceConfig[]): FeedSource[] {
+  syncSources(sources: Array<FeedSourceConfig | SourceConfig>): FeedSource[] {
     const now = this.currentTime();
     return this.transaction(() => {
       const ids = new Set<string>();
-      for (const feed of feeds) {
-        const id = requireText(feed.id, "feed.id");
-        const name = requireText(feed.name, "feed.name");
-        const url = requireText(feed.url, "feed.url");
-        const tags = encodeJson(feed.tags, "feed.tags");
+      for (const configured of sources) {
+        const feed = normalizeSourceConfig(configured);
+        const id = requireText(feed.id, "source.id");
+        const name = requireText(feed.name, "source.name");
+        const url = requireText(feed.url, "source.url");
+        const tags = encodeJson(feed.tags, "source.tags");
+        const connectorConfig = encodeJson(feed.connectorConfig, "source.connectorConfig");
         ids.add(id);
-        const existing = this.database.prepare("SELECT url FROM feed_sources WHERE id = ?").get(id);
-        if (existing && textValue(existing, "url") !== url) {
+        const existing = this.database.prepare("SELECT url, kind, connector_config_json FROM feed_sources WHERE id = ?").get(id);
+        const changed = existing && (textValue(existing, "url") !== url
+          || textValue(existing, "kind") !== feed.kind
+          || textValue(existing, "connector_config_json") !== connectorConfig);
+        if (changed) {
           this.database.prepare("DELETE FROM feed_items WHERE feed_id = ?").run(id);
           this.database.prepare(
-            `UPDATE feed_sources SET display_name = ?, url = ?, enabled = ?, priority = ?, tags_json = ?,
+            `UPDATE feed_sources SET display_name = ?, kind = ?, connector_config_json = ?, url = ?, enabled = ?, priority = ?, tags_json = ?,
              etag = NULL, last_modified = NULL, baseline_at = NULL, last_checked_at = NULL,
              last_success_at = NULL, error_code = NULL, updated_at = ? WHERE id = ?`,
-          ).run(name, url, feed.enabled ? 1 : 0, feed.priority, tags, now, id);
+          ).run(name, feed.kind, connectorConfig, url, feed.enabled ? 1 : 0, feed.priority, tags, now, id);
         } else {
           this.database.prepare(
             `INSERT INTO feed_sources
-              (id, display_name, url, enabled, priority, tags_json, etag, last_modified, baseline_at,
+              (id, display_name, kind, connector_config_json, url, enabled, priority, tags_json, etag, last_modified, baseline_at,
                last_checked_at, last_success_at, error_code, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
              ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name,
+               kind = excluded.kind, connector_config_json = excluded.connector_config_json,
                url = excluded.url, enabled = excluded.enabled, priority = excluded.priority,
                tags_json = excluded.tags_json, updated_at = excluded.updated_at`,
-          ).run(id, name, url, feed.enabled ? 1 : 0, feed.priority, tags, now, now);
+          ).run(id, name, feed.kind, connectorConfig, url, feed.enabled ? 1 : 0, feed.priority, tags, now, now);
         }
       }
       if (ids.size === 0) {
@@ -311,15 +326,27 @@ export class RuntimeStore {
     });
   }
 
-  listFeedSources(enabledOnly = false): FeedSource[] {
+  syncFeedSources(feeds: FeedSourceConfig[]): FeedSource[] {
+    return this.syncSources(feeds);
+  }
+
+  listSources(enabledOnly = false): FeedSource[] {
     try { return this.listFeedSourcesInternal(enabledOnly); } catch (error) { throw mapSqliteError(error); }
   }
 
-  getFeedSource(id: string): FeedSource | null {
+  listFeedSources(enabledOnly = false): FeedSource[] {
+    return this.listSources(enabledOnly);
+  }
+
+  getSource(id: string): FeedSource | null {
     try {
       const row = this.database.prepare("SELECT * FROM feed_sources WHERE id = ?").get(requireText(id, "id"));
       return row ? feedSourceFromRow(row) : null;
     } catch (error) { throw mapSqliteError(error); }
+  }
+
+  getFeedSource(id: string): FeedSource | null {
+    return this.getSource(id);
   }
 
   listFeedItems(feedId?: string): FeedItem[] {
@@ -342,8 +369,9 @@ export class RuntimeStore {
         const source = feedSourceFromRow(row);
         if (source.lastCheckedAt !== null && now - source.lastCheckedAt < intervalMs) continue;
         const active = this.database.prepare(
-          "SELECT 1 FROM jobs WHERE kind = 'feed_poll' AND state IN ('pending', 'running') AND json_extract(payload_json, '$.feedId') = ? LIMIT 1",
-        ).get(source.id);
+          `SELECT 1 FROM jobs WHERE kind = 'feed_poll' AND state IN ('pending', 'running')
+             AND (json_extract(payload_json, '$.sourceId') = ? OR json_extract(payload_json, '$.feedId') = ?) LIMIT 1`,
+        ).get(source.id, source.id);
         if (active) continue;
         const idempotencyKey = `feed_poll:${source.id}:${Math.floor(now / intervalMs)}`;
         if (this.getJobByIdempotencyKey(idempotencyKey)) continue;
@@ -352,7 +380,7 @@ export class RuntimeStore {
           `INSERT INTO jobs (id, origin_turn_id, kind, payload_json, idempotency_key, result_json, error_code,
              state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at)
            VALUES (?, NULL, 'feed_poll', ?, ?, NULL, NULL, 'pending', ?, NULL, NULL, 0, ?, ?, ?)`,
-        ).run(id, encodeJson({ version: 1, feedId: source.id }, "payload"), idempotencyKey, now, maxAttempts, now, now);
+        ).run(id, encodeJson({ version: 2, sourceId: source.id, feedId: source.id }, "payload"), idempotencyKey, now, maxAttempts, now, now);
         created.push(this.getJobRequired(id));
       }
       return created;
@@ -378,7 +406,7 @@ export class RuntimeStore {
       const job = this.getJobById(requireText(jobId, "jobId"));
       if (!job || job.kind !== "feed_poll" || job.state !== "running" || job.runToken !== requireText(runToken, "runToken") || job.leaseExpiresAt === null || job.leaseExpiresAt <= now) return null;
       const payload = job.payload;
-      const feedId = payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : null;
+      const feedId = sourceIdFromPollPayload(payload);
       if (!feedId) throw new RuntimeStoreError("feed_poll job payload is invalid");
       const source = this.getFeedSourceById(feedId);
       if (!source) throw new RuntimeStoreError(`Feed source disappeared: ${feedId}`);
@@ -423,7 +451,7 @@ export class RuntimeStore {
       const job = this.getJobById(requireText(jobId, "jobId"));
       if (!job || job.kind !== "feed_poll" || job.state !== "running" || job.runToken !== requireText(runToken, "runToken") || job.leaseExpiresAt === null || job.leaseExpiresAt <= now) return false;
       const payload = job.payload;
-      const feedId = payload && typeof payload === "object" && "feedId" in payload && typeof payload.feedId === "string" ? payload.feedId : null;
+      const feedId = sourceIdFromPollPayload(payload);
       if (feedId) this.database.prepare("UPDATE feed_sources SET last_checked_at = ?, error_code = ?, updated_at = ? WHERE id = ?").run(now, errorCode, now, feedId);
       const nextState = retryable && job.attempts < job.maxAttempts ? "pending" : "failed";
       const changed = this.database.prepare(
@@ -465,7 +493,7 @@ export class RuntimeStore {
       const digest = buildFeedDigest(this.listFeedDigestCandidates(scope), date, maxItems);
       if (!digest) return null;
       const id = this.newId(), now = this.currentTime();
-      const payload: DigestPayload = { version: 1, scope: { appId: scope.appId, tenantKey: scope.tenantKey,
+      const payload: DigestPayload = { version: 2, scope: { appId: scope.appId, tenantKey: scope.tenantKey,
         ownerOpenId: scope.ownerOpenId }, date, ...digest };
       this.database.prepare(`INSERT INTO jobs (id, origin_turn_id, kind, payload_json, idempotency_key,
         result_json, error_code, state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at)

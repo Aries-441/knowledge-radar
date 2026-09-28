@@ -1,5 +1,5 @@
 import type { TopicAgentRuntime } from "../agent/topic-runtime.js";
-import type { FeishuConfig } from "../channels/feishu/adapter.js";
+import { FeishuError, type FeishuConfig } from "../channels/feishu/adapter.js";
 import { openRuntimeStore, StorageBusyError } from "../runtime/store.js";
 import { processConversationOnce } from "../runtime/turn-worker.js";
 import type { FeedConfig } from "../feed/config.js";
@@ -13,6 +13,7 @@ export async function runCli(args: string[], dependencies: {
   openStore?: typeof openRuntimeStore;
   now?: () => number;
   serveFeishu?: (config: FeishuConfig, feedConfig?: FeedConfig) => Promise<number>;
+  previewFeedDigest?: (config: FeishuConfig, feedConfig: FeedConfig) => Promise<unknown>;
 }): Promise<number> {
   const { agent, capture, env = process.env, stdout = console.log, stderr = console.error,
     openStore = openRuntimeStore, now = Date.now } = dependencies;
@@ -26,6 +27,21 @@ export async function runCli(args: string[], dependencies: {
       return await dependencies.serveFeishu(config, feedConfig);
     } catch {
       stderr(JSON.stringify({ event: "service_failed", error_code: "feishu_configuration_or_startup" }));
+      return 1;
+    }
+  }
+  if (args[0] === "preview-feed-digest") {
+    try {
+      const { readFeishuConfig } = await import("../channels/feishu/adapter.js");
+      const { loadFeedConfig } = await import("../feed/config.js");
+      if (args.length !== 1 || !dependencies.previewFeedDigest) throw new FeishuError("feishu_configuration", true);
+      const config = readFeishuConfig(env);
+      const feedConfig = await loadFeedConfig(env.KNOWLEDGE_RADAR_FEEDS_CONFIG);
+      stdout(JSON.stringify(await dependencies.previewFeedDigest(config, feedConfig)));
+      return 0;
+    } catch (error) {
+      const errorCode = error instanceof FeishuError ? error.code : "feishu_configuration_or_startup";
+      stderr(JSON.stringify({ outcome: "failed", error_code: errorCode }));
       return 1;
     }
   }

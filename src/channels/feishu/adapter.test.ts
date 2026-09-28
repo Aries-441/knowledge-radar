@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { WSClient, EventDispatcher, defaultHttpInstance } from "@larksuiteoapi/node-sdk";
-import { classifyFeishuError, createFeishuTransport, feishuReplyRequest, feishuTextRequest, FeishuError, parseFeishuText,
+import { classifyFeishuError, createFeishuTransport, feishuInteractiveRequest, feishuReplyRequest, feishuTextRequest, FeishuError, parseFeishuText,
   quietSdkLogger, readFeishuConfig, receiveFeishuEvent, type FeishuConfig } from "./adapter.js";
 import type { Outbox } from "../../runtime/types.js";
 
@@ -152,6 +152,28 @@ test("real SDK sends a proactive text to an open_id with a stable UUID", async (
   assert.ok(requests[1].url?.endsWith("/messages"));
   assert.deepEqual(requests[1].body, request.data);
   await assert.rejects(transport.sendText!("", "digest", "a".repeat(40)), FeishuError);
+  transport.close();
+});
+
+test("real SDK sends a Card 2.0 payload and rejects malformed cards", async () => {
+  const requests: { url?: string; body: any }[] = [];
+  const http = defaultHttpInstance.create({ adapter: async request => {
+    requests.push({ url: request.url, body: JSON.parse(request.data ?? "{}") });
+    return { config: request, headers: {}, status: 200, statusText: "OK",
+      data: request.url?.includes("tenant_access_token") ? { code: 0, tenant_access_token: "fake-token", expire: 7200 }
+        : { code: 0, data: { message_id: "om_card" } } };
+  } });
+  const isolated = { ...config, appId: "cli_" + randomUUID().replaceAll("-", "").slice(0, 16) };
+  const transport = createFeishuTransport(isolated, () => {}, () => assert.fail(), { http, makeWs: noWs });
+  const card = JSON.stringify({ schema: "2.0", body: { elements: [] } });
+  const request = feishuInteractiveRequest("ou_owner", card, "b".repeat(40));
+  assert.deepEqual(request.data, { receive_id: "ou_owner", msg_type: "interactive", content: card, uuid: "b".repeat(40) });
+  assert.deepEqual(await transport.sendInteractive!("ou_owner", card, "b".repeat(40)), { messageId: "om_card" });
+  assert.deepEqual(requests[1].body, request.data);
+  assert.throws(() => feishuInteractiveRequest("ou_owner", "{}", "b".repeat(40)),
+    (error: unknown) => error instanceof FeishuError && error.code === "feishu_invalid_payload");
+  assert.throws(() => feishuInteractiveRequest("ou_owner", JSON.stringify({ schema: "2.0", x: "x".repeat(20_001) }), "b".repeat(40)),
+    (error: unknown) => error instanceof FeishuError && error.code === "feishu_payload_too_large");
   transport.close();
 });
 

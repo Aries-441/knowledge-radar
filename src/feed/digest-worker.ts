@@ -7,25 +7,31 @@ import { FeishuError } from "../channels/feishu/adapter.js";
 export type DigestSend = (receiveId: string, text: string, uuid: string) => Promise<{ messageId: string }>;
 export type DigestWorkerLog = (record: { event: string; [key: string]: string | number | undefined }) => void;
 
-export async function processFeedDigestOnce({ store, config, scope, send, now = Date.now, log = () => {} }: {
-  store: RuntimeStore; config: FeedConfig; scope: FeishuScope; send: DigestSend; now?: () => number; log?: DigestWorkerLog;
+export async function processFeedDigestOnce({ store, config, scope, send, sendInteractive, now = Date.now, log = () => {} }: {
+  store: RuntimeStore; config: FeedConfig; scope: FeishuScope; send: DigestSend; sendInteractive?: DigestSend;
+  now?: () => number; log?: DigestWorkerLog;
 }): Promise<{ outcome: "idle" | "succeeded" | "retry_scheduled" | "failed" | "lost_lease"; jobId?: string }> {
   store.recoverFeedDigestJobs(scope);
   const job = store.claimJob(120_000, "feed_digest", scope);
   if (!job) return { outcome: "idle" };
   const token = job.runToken!;
   const payload = job.payload;
-  const valid = payload && typeof payload === "object" && "scope" in payload && "text" in payload
-    && "itemIds" in payload && Array.isArray(payload.itemIds) && typeof payload.text === "string"
+  const valid = payload && typeof payload === "object" && "scope" in payload
+    && "itemIds" in payload && Array.isArray(payload.itemIds)
+    && (("text" in payload && typeof payload.text === "string") || ("card" in payload && typeof payload.card === "string"))
     && typeof payload.scope === "object" && payload.scope !== null;
   if (!valid) {
     const changed = store.failJob(job.id, token, "feed_digest_payload_invalid");
     return { outcome: changed ? "failed" : "lost_lease", jobId: job.id };
   }
-  const digest = payload as { scope: FeishuScope; text: string };
+  const digest = payload as { scope: FeishuScope; text?: string; card?: string };
   try {
     const uuid = createHash("sha256").update(`feed-digest:${job.id}`).digest("hex").slice(0, 40);
-    const response = await send(digest.scope.ownerOpenId, digest.text, uuid);
+    const useCard = Boolean(digest.card && sendInteractive);
+    const sender = useCard ? sendInteractive! : send;
+    const content = useCard ? digest.card! : digest.text;
+    if (!content) throw new FeishuError("feishu_invalid_payload");
+    const response = await sender(digest.scope.ownerOpenId, content, uuid);
     const committed = store.commitFeedDigest(job.id, token, scope, response.messageId);
     const outcome = committed ? "succeeded" : "lost_lease";
     log({ event: "feed_digest", phase: "commit", outcome, job_id: job.id });

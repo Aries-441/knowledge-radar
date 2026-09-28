@@ -13,6 +13,6 @@ export function scheduleFeedPollsOnce({ store, config, now = Date.now }: {
   const calendar = new Cron("* * * * *", { timezone: config.timezone, paused: true });
   calendar.nextRun(new Date(clock));
   calendar.stop();
-  store.syncFeedSources(config.feeds);
+  store.syncSources(config.sources);
   return store.ensureFeedPollJobs(config.pollIntervalMinutes * 60_000).length;
 }

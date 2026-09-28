@@ -66,3 +66,17 @@ test("digest retry keeps candidate unnotified and uses the same job", async () =
     assert.equal(scheduleFeedDigestOnce({ store, config, scope, now: () => clock.now }), false);
   } finally { store.close(); }
 });
+
+test("digest worker falls back to text for a legacy payload", async () => {
+  const store = openRuntimeStore({ path: ":memory:" });
+  try {
+    store.enqueueJob({ kind: "feed_digest", idempotencyKey: "legacy-digest", maxAttempts: 3,
+      payload: { version: 1, scope, date: "2026-09-24", itemIds: [], canonicalUrls: [], text: "legacy digest" } });
+    const sent: string[] = [];
+    const result = await processFeedDigestOnce({ store, config, scope,
+      send: async (_receiveId, text) => { sent.push(text); return { messageId: "om_legacy" }; },
+      sendInteractive: async () => { throw new Error("legacy payload must not use card sender"); } });
+    assert.equal(result.outcome, "succeeded");
+    assert.deepEqual(sent, ["legacy digest"]);
+  } finally { store.close(); }
+});

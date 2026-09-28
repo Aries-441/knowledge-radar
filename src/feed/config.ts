@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises";
 import { URL } from "node:url";
 import YAML from "yaml";
 import { z } from "zod";
+import { sourceConnectorRegistry, type SourceConfig, type SourceKind } from "./source.js";
 
+/** Legacy shape accepted by callers that still construct feeds in memory. */
 export type FeedSourceConfig = {
   id: string;
   name: string;
@@ -11,11 +13,14 @@ export type FeedSourceConfig = {
   priority: number;
   tags: string[];
   itemLimit: number;
+  kind?: SourceKind;
+  connectorConfig?: Record<string, unknown>;
 };
 
 export type FeedConfig = {
   timezone: string;
   pollIntervalMinutes: number;
+  sources: SourceConfig[];
   feeds: FeedSourceConfig[];
   digest?: { enabled: boolean; time: string; maxItems: number };
 };
@@ -42,6 +47,11 @@ const rawFeedSchema = z.object({
   itemLimit: z.number().int().min(1).max(500).optional(),
 });
 
+const rawSourceSchema = rawFeedSchema.extend({
+  kind: z.string().trim().min(1),
+  connectorConfig: z.record(z.string(), z.unknown()).default({}),
+});
+
 const rawConfigSchema = z.object({
   timezone: z.string().trim().min(1).default(DEFAULT_FEED_TIMEZONE),
   pollIntervalMinutes: z.number().int().min(1).max(7 * 24).default(DEFAULT_POLL_INTERVAL_MINUTES),
@@ -49,7 +59,8 @@ const rawConfigSchema = z.object({
     interval: z.union([z.string(), z.number()]).optional(),
     maxItemsPerFeed: z.number().int().min(1).max(500).optional(),
   }).optional(),
-  feeds: z.array(rawFeedSchema).max(200).default([]),
+  feeds: z.array(rawFeedSchema).max(200).optional(),
+  sources: z.array(rawSourceSchema).max(200).optional(),
   digest: z.object({
     enabled: z.boolean().default(false),
     time: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).default("09:00"),
@@ -91,6 +102,30 @@ function validateUrl(value: string): string {
   return parsed.toString();
 }
 
+function normalizeSource(feed: z.infer<typeof rawFeedSchema>, sourceKind: string, connectorConfig: Record<string, unknown> | undefined, itemLimit: number, entryName: string): SourceConfig {
+  if (!sourceConnectorRegistry.has(sourceKind)) throw new FeedConfigError(`${entryName}.kind is not registered`);
+  if (sourceKind === "rss" && connectorConfig && Object.keys(connectorConfig).length > 0) {
+    throw new FeedConfigError(`${entryName}.connectorConfig is not supported for rss`);
+  }
+  const name = feed.name ?? feed.title;
+  if (!name) throw new FeedConfigError(`${entryName}.name is required`);
+  return {
+    id: feed.id,
+    name,
+    kind: sourceKind as SourceKind,
+    url: validateUrl(feed.url),
+    enabled: feed.enabled,
+    priority: feed.priority,
+    tags: [...new Set(feed.tags)],
+    itemLimit: feed.itemLimit ?? itemLimit,
+    connectorConfig: connectorConfig ?? {},
+  };
+}
+
+export function normalizeSourceConfig(source: FeedSourceConfig): SourceConfig {
+  return normalizeSource(source, source.kind ?? "rss", source.connectorConfig, source.itemLimit, `sources.${source.id}`);
+}
+
 function formatIssues(error: z.ZodError): string {
   return error.issues.map(issue => `${issue.path.join(".") || "config"}: ${issue.message}`).join("; ");
 }
@@ -99,31 +134,31 @@ export function parseFeedConfig(value: unknown): FeedConfig {
   const parsedConfig = rawConfigSchema.safeParse(value);
   if (!parsedConfig.success) throw new FeedConfigError(formatIssues(parsedConfig.error));
   const raw = parsedConfig.data;
+  if (raw.feeds !== undefined && raw.sources !== undefined) {
+    throw new FeedConfigError("config cannot define both feeds and sources");
+  }
   validateTimezone(raw.timezone);
   const pollIntervalMinutes = raw.poll?.interval === undefined
     ? raw.pollIntervalMinutes
     : Math.round(parseInterval(raw.poll.interval) / 60_000);
   const itemLimit = raw.poll?.maxItemsPerFeed ?? DEFAULT_FEED_ITEM_LIMIT;
   const ids = new Set<string>();
-  const feeds = raw.feeds.map(feed => {
-    if (ids.has(feed.id)) throw new FeedConfigError(`duplicate feed id: ${feed.id}`);
-    ids.add(feed.id);
-    const name = feed.name ?? feed.title;
-    if (!name) throw new FeedConfigError(`feeds.${feed.id}.name is required`);
-    return {
-      id: feed.id,
-      name,
-      url: validateUrl(feed.url),
-      enabled: feed.enabled,
-      priority: feed.priority,
-      tags: [...new Set(feed.tags)],
-      itemLimit: feed.itemLimit ?? itemLimit,
-    };
-  });
+  const sources = raw.sources !== undefined
+    ? raw.sources.map(feed => {
+      if (ids.has(feed.id)) throw new FeedConfigError(`duplicate source id: ${feed.id}`);
+      ids.add(feed.id);
+      return normalizeSource(feed, feed.kind, feed.connectorConfig, itemLimit, `sources.${feed.id}`);
+    })
+    : (raw.feeds ?? []).map(feed => {
+      if (ids.has(feed.id)) throw new FeedConfigError(`duplicate feed id: ${feed.id}`);
+      ids.add(feed.id);
+      return normalizeSource(feed, "rss", {}, itemLimit, `feeds.${feed.id}`);
+    });
   const result: FeedConfig = {
     timezone: raw.timezone,
     pollIntervalMinutes,
-    feeds,
+    sources,
+    feeds: sources,
   };
   if (raw.digest) result.digest = raw.digest;
   return result;

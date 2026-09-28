@@ -150,7 +150,7 @@ export async function serveFeishu(options: FeishuServiceOptions): Promise<{ exit
       loops.push(loop(async () => (await processCaptureJobOnce({ store: activeStore, scope: config,
         archiveDir: captureAvailable ? config.archiveDir : undefined, now, log, dependencies: options.capture,
       })).outcome !== "idle").catch(() => { log({ event: "service_failed", error_code: "loop_failure" }); stop(1); }));
-      if (options.feedConfig?.feeds.some(feed => feed.enabled)) {
+      if (options.feedConfig?.sources.some(source => source.enabled)) {
         loops.push(loop(async () => scheduleFeedPollsOnce({ store: activeStore, config: options.feedConfig!, now }) > 0)
           .catch(() => { log({ event: "service_failed", error_code: "feed_scheduler_failure" }); stop(1); }));
         loops.push(loop(async () => (await processFeedPollOnce({
@@ -163,7 +163,8 @@ export async function serveFeishu(options: FeishuServiceOptions): Promise<{ exit
             store: activeStore, config: options.feedConfig!, scope: config, now,
           })).catch(() => { log({ event: "service_failed", error_code: "feed_digest_scheduler_failure" }); stop(1); }));
           loops.push(loop(async () => (await processFeedDigestOnce({
-            store: activeStore, config: options.feedConfig!, scope: config, send: sendText, now, log,
+            store: activeStore, config: options.feedConfig!, scope: config, send: sendText,
+            sendInteractive: activeTransport.sendInteractive, now, log,
           })).outcome !== "idle").catch(() => { if (!stopping.signal.aborted) { log({ event: "service_failed", error_code: "feed_digest_worker_failure" }); stop(1); } }));
         }
       }

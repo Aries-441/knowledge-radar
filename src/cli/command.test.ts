@@ -55,6 +55,23 @@ test("serve-feishu CLI injects fake service, validates configuration and leaves 
   assert.ok(!errors.join("").includes("never-log"));
 });
 
+test("preview-feed-digest emits a machine-readable result and validates configuration", async () => {
+  const env = { FEISHU_APP_ID: "cli_0000000000000001", FEISHU_APP_SECRET: "never-log",
+    FEISHU_TENANT_KEY: "tenant", FEISHU_ALLOWED_OPEN_ID: "ou_owner", KNOWLEDGE_RADAR_STATE_PATH: ":memory:" };
+  const output: string[] = [], errors: string[] = [];
+  let calls = 0;
+  const deps = { env, stdout: (line: string) => output.push(line), stderr: (line: string) => errors.push(line),
+    capture: async () => assert.fail("not a URL"), agent: async () => assert.fail("not a model call"),
+    previewFeedDigest: async (config: { ownerOpenId: string }) => { assert.equal(config.ownerOpenId, "ou_owner"); calls++; return { outcome: "empty" }; } };
+  assert.equal(await runCli(["preview-feed-digest"], deps), 0);
+  assert.deepEqual(output, ['{"outcome":"empty"}']);
+  assert.equal(await runCli(["preview-feed-digest", "extra"], deps), 1);
+  assert.equal(await runCli(["preview-feed-digest"], { ...deps, env: { ...env, FEISHU_ALLOWED_OPEN_ID: "" } }), 1);
+  assert.equal(calls, 1);
+  assert.ok(errors.every(line => JSON.parse(line).outcome === "failed"));
+  assert.ok(!errors.join("").includes("never-log"));
+});
+
 test("local run-once handler uses a Fake Agent and emits exact outcome JSON across retries", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "radar-cli-"));
   const path = join(directory, "radar.db");
