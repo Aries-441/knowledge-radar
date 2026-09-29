@@ -1,8 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { createFeishuTransport, receiveFeishuEvent, FeishuError,
+import { createFeishuTransport, parseFeishuCardAction, receiveFeishuEvent, FeishuError,
   type FeishuConfig, type FeishuTransport, type FeishuSend, type SafeLog } from "../channels/feishu/adapter.js";
 import type { TopicAgentRuntime } from "../agent/topic-runtime.js";
-import { openRuntimeStore, StorageBusyError, type RuntimeStore } from "./store.js";
+import { openRuntimeStore, RuntimeStoreError, StorageBusyError, type RuntimeStore } from "./store.js";
 import type { FeishuScope } from "./types.js";
 import { processConversationOnce } from "./turn-worker.js";
 import { processCaptureJobOnce, type CaptureDependencies } from "./capture-worker.js";
@@ -13,6 +13,7 @@ import { scheduleFeedPollsOnce } from "../feed/scheduler.js";
 import { processFeedPollOnce } from "../feed/worker.js";
 import { scheduleFeedDigestOnce } from "../feed/digest-scheduler.js";
 import { processFeedDigestOnce } from "../feed/digest-worker.js";
+import { updateDigestCardInterest } from "../feed/digest.js";
 
 export async function deliverFeishuOnce({ store, scope, send, now = Date.now, log = () => {} }: {
   store: RuntimeStore; scope: FeishuScope; send: FeishuSend; now?: () => number; log?: SafeLog;
@@ -69,6 +70,49 @@ export async function processFeishuTurnsOnce({ store, scope, agent, now = Date.n
   return progress;
 }
 
+export function processFeishuCardActionOnce({ store, scope, event, log = () => {} }: {
+  store: RuntimeStore;
+  scope: FeishuScope;
+  event: unknown;
+  log?: SafeLog;
+}): unknown {
+  const action = parseFeishuCardAction(event, scope);
+  if (!action) {
+    log({ event: "ignored", reason: "invalid_card_action" });
+    return undefined;
+  }
+  const message = store.getDigestMessage(scope, action.messageId);
+  if (!message) {
+    log({ event: "ignored", reason: "digest_message_not_found", message_id: action.messageId, item_id: action.action.item_id });
+    return undefined;
+  }
+  const proposedCard = updateDigestCardInterest(message.card, action.action.item_id, action.action.target_interested);
+  if (!proposedCard) {
+    log({ event: "ignored", reason: "digest_action_not_in_card", message_id: action.messageId, item_id: action.action.item_id });
+    return undefined;
+  }
+  const result = store.applyDigestFeedback({
+    scope,
+    eventId: action.eventId,
+    messageId: action.messageId,
+    feedItemId: action.action.item_id,
+    targetInterested: action.action.target_interested,
+  });
+  const updatedCard = result.interested === action.action.target_interested
+    ? proposedCard
+    : updateDigestCardInterest(message.card, action.action.item_id, result.interested);
+  if (!updatedCard) {
+    log({ event: "ignored", reason: "digest_card_update_failed", message_id: action.messageId, item_id: action.action.item_id });
+    return undefined;
+  }
+  log({ event: "digest_feedback", message_id: action.messageId, item_id: action.action.item_id,
+    event_id: action.eventId, target_interested: result.interested ? 1 : 0, outcome: result.outcome });
+  // Card 2.0 callback responses wrap the returned card as a raw card. The
+  // event itself is accepted without this envelope, but Feishu will not apply
+  // the replacement to the original message.
+  return { card: { type: "raw", data: JSON.parse(updatedCard) } };
+}
+
 export type FeishuServiceOptions = {
   config: FeishuConfig;
   agent: TopicAgentRuntime;
@@ -116,8 +160,26 @@ export async function serveFeishu(options: FeishuServiceOptions): Promise<{ exit
       transport = createTransport(config, log, () => stop(1));
       await transport.start(async event => {
         if (stopping.signal.aborted) throw new Error("service_stopping");
+        if (parseFeishuCardAction(event, config)) {
+          try {
+            return processFeishuCardActionOnce({ store: activeStore, scope: config, event, log });
+          } catch (error) {
+            if (error instanceof StorageBusyError) {
+              log({ event: "card_action_error", error_code: "storage_busy" });
+              throw new Error("storage_busy");
+            }
+            if (error instanceof RuntimeStoreError) {
+              log({ event: "card_action_error", error_code: error.message });
+              return undefined;
+            }
+            log({ event: "card_action_error", error_code: "storage_or_internal_failure" });
+            stop(1);
+            throw new Error("storage_or_internal_failure");
+          }
+        }
         try {
           receiveFeishuEvent(event, config, input => activeStore.acceptFeishuText(input), log);
+          return undefined;
         } catch (error) {
           const busy = error instanceof StorageBusyError;
           log({ event: "ingress_error", error_code: busy ? "storage_busy" : "storage_failure" });

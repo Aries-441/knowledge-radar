@@ -10,6 +10,8 @@ node --env-file=.env --import tsx src/cli.ts preview-feed-digest
 
 The command sends a Card 2.0 preview to `FEISHU_ALLOWED_OPEN_ID`. It returns `sent` with the Feishu message ID, or `empty` when there are no candidates. The bot needs `im:message:send_as_bot`.
 
+Each article in the card has a star button. Clicking it records an interest state and updates the same card; clicking it again toggles the state. Enable Card Callback in the Feishu Developer Console under `应用 → 事件与回调 → 回调配置`; the existing long connection then receives `card.action.trigger` alongside `im.message.receive_v1`. See [飞书接入与故障排查](docs/feishu.md#摘要卡片交互) and [Source ingestion](docs/feed-ingestion.md#manual-preview) for setup and verification.
+
 **通过飞书收集、总结和讨论文章的自托管 AI 知识收件箱。**
 
 把手机上发现的好文章发送给机器人，获取摘要与要点，继续追问，并将结果保存到自己的 Markdown 知识库。

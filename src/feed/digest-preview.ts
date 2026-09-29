@@ -13,12 +13,15 @@ export async function previewFeedDigestOnce({ store, config, scope, send, now = 
   now?: () => number;
 }): Promise<{ outcome: "empty" } | { outcome: "sent"; messageId: string; date: string; itemCount: number }> {
   const { date } = digestLocalTime(now(), config.timezone);
-  const digest = buildFeedDigestCard(store.listFeedDigestCandidates(scope), date, config.digest?.maxItems ?? 20);
+  const candidates = store.listFeedDigestCandidates(scope);
+  const digest = buildFeedDigestCard(candidates, date, config.digest?.maxItems ?? 20,
+    store.listDigestFeedbackStates(scope, candidates.map(item => item.id)));
   if (!digest) return { outcome: "empty" };
   const uuid = createHash("sha256")
     .update(`feed-digest-preview:${scope.appId}:${scope.tenantKey}:${scope.ownerOpenId}:${date}:${digest.itemIds.join(",")}`)
     .digest("hex")
     .slice(0, 40);
   const response = await send(scope.ownerOpenId, digest.card, uuid);
+  store.recordDigestMessage(scope, response.messageId, digest.card, digest.itemIds);
   return { outcome: "sent", messageId: response.messageId, date, itemCount: digest.itemIds.length };
 }

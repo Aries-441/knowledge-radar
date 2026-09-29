@@ -80,3 +80,17 @@ test("digest worker falls back to text for a legacy payload", async () => {
     assert.deepEqual(sent, ["legacy digest"]);
   } finally { store.close(); }
 });
+
+test("digest worker records the sent card only when the interactive sender succeeds", async () => {
+  const store = openRuntimeStore({ path: ":memory:" });
+  try {
+    const card = JSON.stringify({ schema: "2.0", body: { elements: [] } });
+    store.enqueueJob({ kind: "feed_digest", idempotencyKey: "card-digest", maxAttempts: 3,
+      payload: { version: 2, scope, date: "2026-09-24", itemIds: ["item-1"], canonicalUrls: [], text: "text", card } });
+    const result = await processFeedDigestOnce({ store, config, scope,
+      send: async () => { throw new Error("text sender must not be used"); },
+      sendInteractive: async () => ({ messageId: "om_card" }) });
+    assert.equal(result.outcome, "succeeded");
+    assert.equal(store.getDigestMessage(scope, "om_card")?.card, card);
+  } finally { store.close(); }
+});

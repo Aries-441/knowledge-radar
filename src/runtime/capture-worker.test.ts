@@ -183,7 +183,7 @@ test("all three service loops run concurrently and share one stop/drain boundary
   f.accept(); await f.turn(); f.accept("chat while job runs");
   const started = [gate(), gate(), gate()], releases = [gate(), gate(), gate()];
   const stop = new AbortController();
-  let receive!: (event: unknown) => Promise<void>;
+  let receive!: (event: unknown) => Promise<unknown>;
   let closed = false;
   const pending = serveFeishu({ config: { ...scope, statePath: f.path, appSecret: "secret", archiveDir: f.directory },
     agent: async () => { started[0].resolve(); await releases[0].promise; return { text: "chat" }; },

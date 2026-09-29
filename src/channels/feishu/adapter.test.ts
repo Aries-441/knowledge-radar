@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { WSClient, EventDispatcher, defaultHttpInstance } from "@larksuiteoapi/node-sdk";
-import { classifyFeishuError, createFeishuTransport, feishuInteractiveRequest, feishuReplyRequest, feishuTextRequest, FeishuError, parseFeishuText,
+import { classifyFeishuError, createFeishuTransport, feishuInteractiveRequest, feishuReplyRequest, feishuTextRequest, FeishuError, parseFeishuCardAction, parseFeishuText,
   quietSdkLogger, readFeishuConfig, receiveFeishuEvent, type FeishuConfig } from "./adapter.js";
 import type { Outbox } from "../../runtime/types.js";
 
@@ -38,6 +38,34 @@ test("configuration and untrusted events fail closed; preserve text and never di
   const withoutTenant = { ...value, tenant_key: undefined, sender: { ...value.sender, tenant_key: undefined } };
   assert.equal(parseFeishuText(withoutTenant, config), null);
   assert.throws(() => receiveFeishuEvent(event(), config, () => { throw Error("commit failed"); }, () => {}));
+});
+
+test("card action parser validates scope, event identity, and controlled interest values", () => {
+  const value = {
+    app_id: config.appId,
+    tenant_key: config.tenantKey,
+    event_id: "event-1",
+    context: { open_message_id: "om_card" },
+    operator: { open_id: config.ownerOpenId },
+    action: { tag: "button", value: { action: "digest_interest", item_id: "item-1", target_interested: true } },
+  };
+  assert.deepEqual(parseFeishuCardAction(value, config), {
+    ...config, eventId: "event-1", messageId: "om_card", operatorOpenId: config.ownerOpenId,
+    action: { action: "digest_interest", item_id: "item-1", target_interested: true },
+  });
+  for (const mutate of [
+    (event: typeof value) => { event.app_id = "other"; },
+    (event: typeof value) => { event.tenant_key = "other"; },
+    (event: typeof value) => { event.event_id = ""; },
+    (event: typeof value) => { event.context.open_message_id = ""; },
+    (event: typeof value) => { event.operator.open_id = "other"; },
+    (event: typeof value) => { event.action.tag = "select_static"; },
+    (event: typeof value) => { (event.action.value as Record<string, unknown>).target_interested = "true"; },
+    (event: typeof value) => { event.action.value.action = "other"; },
+  ]) {
+    const event = structuredClone(value); mutate(event);
+    assert.equal(parseFeishuCardAction(event, config), null);
+  }
 });
 
 test("reply uses immutable destination, deterministic bounded UUID, and actual serialized bytes", () => {
@@ -90,6 +118,39 @@ test("real SDK callback rejection becomes failed ACK; successful callback become
     fail = false;
     await internal.handleEventData(frame);
     assert.deepEqual(codes, [500, 200]);
+  } finally { ws.close({ force: true }); }
+});
+
+test("real SDK card callback returns a Card 2.0 response in the ACK", async () => {
+  const ws = new WSClient({ appId: config.appId, appSecret: config.appSecret, logger: quietSdkLogger });
+  const internal = ws as unknown as {
+    eventDispatcher: EventDispatcher;
+    sendMessage: (frame: { payload: Uint8Array }) => void;
+    handleEventData: (frame: unknown) => Promise<void>;
+  };
+  const acknowledgements: any[] = [];
+  internal.sendMessage = frame => acknowledgements.push(JSON.parse(new TextDecoder().decode(frame.payload)));
+  internal.eventDispatcher = new EventDispatcher({ logger: quietSdkLogger }).register({
+    "card.action.trigger": async (data: unknown) => {
+      assert.equal((data as any).action.value.action, "digest_interest");
+      return { card: { type: "raw", data: { schema: "2.0", body: { elements: [] } } } };
+    },
+  });
+  const envelope = {
+    schema: "2.0",
+    header: { app_id: config.appId, tenant_key: config.tenantKey, event_type: "card.action.trigger", event_id: "event-card" },
+    event: { app_id: config.appId, tenant_key: config.tenantKey, event_id: "event-card",
+      context: { open_message_id: "om_card" }, operator: { open_id: config.ownerOpenId },
+      action: { tag: "button", value: { action: "digest_interest", item_id: "item-1", target_interested: true } } },
+  };
+  const frame = { headers: Object.entries({ message_id: "frame", sum: "1", seq: "0", type: "event", trace_id: "trace" })
+    .map(([key, value]) => ({ key, value })), payload: new TextEncoder().encode(JSON.stringify(envelope)) };
+  try {
+    await internal.handleEventData(frame);
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0].code, 200);
+    assert.deepEqual(JSON.parse(Buffer.from(acknowledgements[0].data, "base64").toString("utf8")),
+      { card: { type: "raw", data: { schema: "2.0", body: { elements: [] } } } });
   } finally { ws.close({ force: true }); }
 });
 

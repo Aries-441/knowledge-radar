@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { Client, WSClient, EventDispatcher, Domain, LoggerLevel, defaultHttpInstance } from "@larksuiteoapi/node-sdk";
+import type { DigestInterestAction } from "../../feed/digest.js";
 import type { FeishuAcceptance, FeishuScope, FeishuText, Outbox } from "../../runtime/types.js";
 
 export type FeishuConfig = FeishuScope & { appSecret: string; statePath: string; archiveDir?: string };
@@ -8,8 +9,14 @@ export type SafeLog = (record: { event: string; [key: string]: string | number |
 export type FeishuSend = (messageId: string, outbox: Outbox) => Promise<void>;
 export type FeishuSendText = (receiveId: string, text: string, uuid: string) => Promise<{ messageId: string }>;
 export type FeishuSendInteractive = (receiveId: string, card: string, uuid: string) => Promise<{ messageId: string }>;
+export type FeishuCardAction = FeishuScope & {
+  eventId: string;
+  messageId: string;
+  operatorOpenId: string;
+  action: DigestInterestAction;
+};
 export type FeishuTransport = {
-  start: (receive: (event: unknown) => Promise<void>) => Promise<void>;
+  start: (receive: (event: unknown) => Promise<unknown>) => Promise<void>;
   close: () => void;
   send: FeishuSend;
   sendText?: FeishuSendText;
@@ -42,6 +49,33 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function nonempty(value: unknown): value is string { return typeof value === "string" && Boolean(value.trim()); }
+
+function nestedRecord(value: unknown, key: string): Record<string, unknown> {
+  return record(record(value)[key]);
+}
+
+function actionFromValue(value: unknown): DigestInterestAction | null {
+  const action = record(value);
+  if (action.action !== "digest_interest" || !nonempty(action.item_id) || typeof action.target_interested !== "boolean") return null;
+  return { action: "digest_interest", item_id: action.item_id, target_interested: action.target_interested };
+}
+
+export function parseFeishuCardAction(event: unknown, scope: FeishuScope): FeishuCardAction | null {
+  const data = record(event);
+  const eventData = nestedRecord(data, "event");
+  const context = nestedRecord(data, "context");
+  const operator = record(data.operator ?? eventData.operator);
+  const action = record(data.action ?? eventData.action);
+  const appId = data.app_id ?? eventData.app_id;
+  const tenantKey = data.tenant_key ?? eventData.tenant_key;
+  const eventId = data.event_id ?? eventData.event_id;
+  const messageId = context.open_message_id ?? data.open_message_id ?? eventData.open_message_id;
+  const operatorOpenId = operator.open_id;
+  const parsedAction = actionFromValue(action.value);
+  if (appId !== scope.appId || tenantKey !== scope.tenantKey || !nonempty(eventId) || !nonempty(messageId)
+    || operatorOpenId !== scope.ownerOpenId || action.tag !== "button" || !parsedAction) return null;
+  return { ...scope, eventId, messageId, operatorOpenId, action: parsedAction };
+}
 
 export function parseFeishuText(event: unknown, scope: FeishuScope): FeishuText | null {
   const data = record(event);
@@ -173,7 +207,7 @@ export function createFeishuTransport(
     async start(receive) {
       log({ event: "connecting" });
       const dispatcher = new EventDispatcher({ logger: quietSdkLogger, loggerLevel: LoggerLevel.error })
-        .register({ "im.message.receive_v1": receive });
+        .register({ "im.message.receive_v1": receive, "card.action.trigger": receive });
       await ws.start({ eventDispatcher: dispatcher });
     },
     close() { closed = true; ws.close({ force: true }); },

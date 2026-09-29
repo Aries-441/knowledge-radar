@@ -45,6 +45,9 @@ import {
   type FeishuScope,
   type FeishuText,
   type FeishuAcceptance,
+  type DigestFeedbackResult,
+  type DigestFeedbackState,
+  type DigestMessage,
 } from "./types.js";
 
 function sourceIdFromPollPayload(payload: unknown): string | null {
@@ -53,6 +56,23 @@ function sourceIdFromPollPayload(payload: unknown): string | null {
   if (typeof record.sourceId === "string") return record.sourceId;
   if (typeof record.feedId === "string") return record.feedId;
   return null;
+}
+
+function digestMessageFromRow(row: Record<string, unknown>): DigestMessage {
+  let itemIds: unknown;
+  try { itemIds = JSON.parse(textValue(row, "item_ids_json")); } catch { throw new RuntimeStoreError("digest_message_item_ids_invalid"); }
+  if (!Array.isArray(itemIds) || itemIds.some(itemId => typeof itemId !== "string" || !itemId)) {
+    throw new RuntimeStoreError("digest_message_item_ids_invalid");
+  }
+  return {
+    appId: textValue(row, "app_id"),
+    tenantKey: textValue(row, "tenant_key"),
+    ownerOpenId: textValue(row, "owner_open_id"),
+    messageId: textValue(row, "message_id"),
+    card: textValue(row, "card_json"),
+    itemIds,
+    createdAt: numberValue(row, "created_at"),
+  };
 }
 
 export { RuntimeStoreError, StorageBusyError } from "./types.js";
@@ -68,6 +88,9 @@ export type {
   Outbox,
   RuntimeStoreOptions,
   Turn,
+  DigestFeedbackResult,
+  DigestFeedbackState,
+  DigestMessage,
 } from "./types.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 250;
@@ -478,6 +501,100 @@ export class RuntimeStore {
       sourceName: textValue(row, "source_name"), priority: numberValue(row, "priority") }));
   }
 
+  listDigestFeedbackStates(scope: FeishuScope, itemIds?: string[]): Map<string, boolean> {
+    const params = this.feishuScopeParams(scope);
+    const ids = itemIds?.map(id => requireText(id, "itemId"));
+    const filter = ids && ids.length > 0 ? ` AND feed_item_id IN (${ids.map(() => "?").join(", ")})` : "";
+    try {
+      const rows = this.database.prepare(`
+        SELECT feed_item_id, interested FROM digest_feedback
+        WHERE app_id = ? AND tenant_key = ? AND owner_open_id = ?${filter}
+      `).all(...params, ...(ids ?? []));
+      return new Map(rows.map(row => [textValue(row, "feed_item_id"), numberValue(row, "interested") === 1]));
+    } catch (error) { throw mapSqliteError(error); }
+  }
+
+  recordDigestMessage(scope: FeishuScope, messageId: string, card: string, itemIds: string[]): DigestMessage {
+    const [appId, tenantKey, ownerOpenId] = this.feishuScopeParams(scope);
+    const id = requireText(messageId, "messageId");
+    const content = requireText(card, "card");
+    if (Buffer.byteLength(content, "utf8") > 20_000) throw new RangeError("card exceeds Feishu payload limit");
+    const ids = itemIds.map(itemId => requireText(itemId, "itemId"));
+    if (ids.length === 0 || ids.length > 50) throw new RangeError("itemIds must contain between 1 and 50 items");
+    const itemIdsJson = encodeJson([...new Set(ids)], "itemIds");
+    return this.transaction(() => this.recordDigestMessageInternal(
+      appId, tenantKey, ownerOpenId, id, content, itemIdsJson,
+    ));
+  }
+
+  getDigestMessage(scope: FeishuScope, messageId: string): DigestMessage | null {
+    const [appId, tenantKey, ownerOpenId] = this.feishuScopeParams(scope);
+    try {
+      const row = this.database.prepare(`
+        SELECT * FROM digest_messages
+        WHERE message_id = ? AND app_id = ? AND tenant_key = ? AND owner_open_id = ?
+      `).get(requireText(messageId, "messageId"), appId, tenantKey, ownerOpenId);
+      return row ? digestMessageFromRow(row) : null;
+    } catch (error) { throw mapSqliteError(error); }
+  }
+
+  applyDigestFeedback({
+    scope, eventId, messageId, feedItemId, targetInterested,
+  }: {
+    scope: FeishuScope;
+    eventId: string;
+    messageId: string;
+    feedItemId: string;
+    targetInterested: boolean;
+  }): DigestFeedbackResult {
+    const [appId, tenantKey, ownerOpenId] = this.feishuScopeParams(scope);
+    const id = requireText(eventId, "eventId");
+    const message = requireText(messageId, "messageId");
+    const itemId = requireText(feedItemId, "feedItemId");
+    if (typeof targetInterested !== "boolean") throw new TypeError("targetInterested must be boolean");
+    return this.transaction(() => {
+      const digestMessage = this.getDigestMessageById(message);
+      if (!digestMessage || digestMessage.appId !== appId || digestMessage.tenantKey !== tenantKey || digestMessage.ownerOpenId !== ownerOpenId) {
+        throw new RuntimeStoreError("digest_feedback_message_not_found");
+      }
+      if (!digestMessage.itemIds.includes(itemId)) throw new RuntimeStoreError("digest_feedback_item_not_in_message");
+      if (!this.database.prepare("SELECT 1 FROM feed_items WHERE id = ?").get(itemId)) {
+        throw new RuntimeStoreError("digest_feedback_item_not_found");
+      }
+
+      const previousEvent = this.database.prepare("SELECT * FROM digest_feedback_events WHERE event_id = ?").get(id);
+      if (previousEvent) {
+        if (textValue(previousEvent, "app_id") !== appId || textValue(previousEvent, "tenant_key") !== tenantKey
+          || textValue(previousEvent, "owner_open_id") !== ownerOpenId || textValue(previousEvent, "message_id") !== message
+          || textValue(previousEvent, "feed_item_id") !== itemId || numberValue(previousEvent, "target_interested") !== (targetInterested ? 1 : 0)) {
+          throw new RuntimeStoreError("digest_feedback_event_conflict");
+        }
+        const current = this.database.prepare(`
+          SELECT interested FROM digest_feedback
+          WHERE app_id = ? AND tenant_key = ? AND owner_open_id = ? AND feed_item_id = ?
+        `).get(appId, tenantKey, ownerOpenId, itemId);
+        return { outcome: "duplicate", interested: current ? numberValue(current, "interested") === 1 : targetInterested };
+      }
+
+      const now = this.currentTime();
+      this.database.prepare(`
+        INSERT INTO digest_feedback_events
+          (event_id, app_id, tenant_key, owner_open_id, message_id, feed_item_id, target_interested, received_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, appId, tenantKey, ownerOpenId, message, itemId, targetInterested ? 1 : 0, now);
+      this.database.prepare(`
+        INSERT INTO digest_feedback
+          (app_id, tenant_key, owner_open_id, feed_item_id, interested, last_message_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (app_id, tenant_key, owner_open_id, feed_item_id) DO UPDATE SET
+          interested = excluded.interested,
+          last_message_id = excluded.last_message_id,
+          updated_at = excluded.updated_at
+      `).run(appId, tenantKey, ownerOpenId, itemId, targetInterested ? 1 : 0, message, now);
+      return { outcome: "applied", interested: targetInterested };
+    });
+  }
+
   ensureFeedDigestJob(scope: FeishuScope, date: string, maxItems: number): Job | null {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isInteger(maxItems) || maxItems < 1 || maxItems > 50) {
       throw new TypeError("Invalid digest configuration");
@@ -490,7 +607,8 @@ export class RuntimeStore {
       // Freeze and finish one delivery before preparing another day's batch.
       if (this.database.prepare(`SELECT 1 FROM jobs WHERE kind = 'feed_digest'
           AND state IN ('pending', 'running') AND ${DIGEST_SCOPE_SQL} LIMIT 1`).get(...scopeParams)) return null;
-      const digest = buildFeedDigest(this.listFeedDigestCandidates(scope), date, maxItems);
+      const candidates = this.listFeedDigestCandidates(scope);
+      const digest = buildFeedDigest(candidates, date, maxItems, this.listDigestFeedbackStates(scope, candidates.map(item => item.id)));
       if (!digest) return null;
       const id = this.newId(), now = this.currentTime();
       const payload: DigestPayload = { version: 2, scope: { appId: scope.appId, tenantKey: scope.tenantKey,
@@ -515,7 +633,7 @@ export class RuntimeStore {
     });
   }
 
-  commitFeedDigest(jobId: string, runToken: string, scope: FeishuScope, messageId: string): boolean {
+  commitFeedDigest(jobId: string, runToken: string, scope: FeishuScope, messageId: string, card?: string): boolean {
     requireText(messageId, "messageId");
     return this.transaction(() => {
       const now = this.currentTime();
@@ -524,6 +642,11 @@ export class RuntimeStore {
         .get(jobId, runToken, now, ...this.feishuScopeParams(scope));
       if (!row) return false;
       const payload = jobFromRow(row).payload as DigestPayload;
+      if (card) {
+        const itemIdsJson = encodeJson(payload.itemIds, "itemIds");
+        this.recordDigestMessageInternal(scope.appId, scope.tenantKey, scope.ownerOpenId,
+          requireText(messageId, "messageId"), card, itemIdsJson);
+      }
       for (const id of payload.itemIds) {
         this.database.prepare("UPDATE feed_items SET notified_at = ?, updated_at = ? WHERE id = ? AND state = 'candidate' AND notified_at IS NULL")
           .run(now, now, id);
@@ -1162,6 +1285,37 @@ export class RuntimeStore {
   private getJobByIdempotencyKey(idempotencyKey: string): Job | null {
     const row = this.database.prepare("SELECT * FROM jobs WHERE idempotency_key = ?").get(idempotencyKey);
     return row ? jobFromRow(row) : null;
+  }
+
+  private getDigestMessageById(messageId: string): DigestMessage | null {
+    const row = this.database.prepare("SELECT * FROM digest_messages WHERE message_id = ?").get(messageId);
+    return row ? digestMessageFromRow(row) : null;
+  }
+
+  private recordDigestMessageInternal(
+    appId: string, tenantKey: string, ownerOpenId: string, messageId: string, card: string, itemIdsJson: string,
+  ): DigestMessage {
+    const existing = this.getDigestMessageById(messageId);
+    if (existing) {
+      if (existing.appId !== appId || existing.tenantKey !== tenantKey || existing.ownerOpenId !== ownerOpenId
+        || existing.card !== card || JSON.stringify(existing.itemIds) !== itemIdsJson) {
+        throw new RuntimeStoreError("digest_message_conflict");
+      }
+      return existing;
+    }
+    const now = this.currentTime();
+    this.database.prepare(`
+      INSERT INTO digest_messages
+        (message_id, app_id, tenant_key, owner_open_id, card_json, item_ids_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(messageId, appId, tenantKey, ownerOpenId, card, itemIdsJson, now);
+    return this.getDigestMessageRequired(messageId);
+  }
+
+  private getDigestMessageRequired(messageId: string): DigestMessage {
+    const message = this.getDigestMessageById(messageId);
+    if (!message) throw new RuntimeStoreError(`Digest message disappeared: ${messageId}`);
+    return message;
   }
 
   private listFeedSourcesInternal(enabledOnly: boolean): FeedSource[] {

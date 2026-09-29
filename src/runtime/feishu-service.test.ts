@@ -7,9 +7,11 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { openRuntimeStore, StorageBusyError } from "./store.js";
 import { processConversationOnce } from "./turn-worker.js";
-import { deliverFeishuOnce, processFeishuTurnsOnce, serveFeishu } from "./feishu-service.js";
+import { deliverFeishuOnce, processFeishuCardActionOnce, processFeishuTurnsOnce, serveFeishu } from "./feishu-service.js";
 import { FeishuError, feishuReplyRequest, type FeishuConfig, type SafeLog } from "../channels/feishu/adapter.js";
 import type { FeishuText } from "./types.js";
+import { buildFeedDigestCard, DIGEST_STAR_SELECTED, DIGEST_STAR_UNSELECTED } from "../feed/digest.js";
+import { parseFeedConfig } from "../feed/config.js";
 
 const scope = { appId: "cli_0000000000000001", tenantKey: "tenant", ownerOpenId: "ou_owner" };
 const input = (messageId = "message", chatId = "chat", text = "hello"): FeishuText => ({ ...scope, messageId, chatId, text });
@@ -48,7 +50,7 @@ test("v1 upgrade preserves original queues; failed migration rolls back and v2 r
   const outbox = f.store.enqueueOutbox({ turnId: turn.id, kind: "local", payload: {}, maxAttempts: 3 });
   const sending = f.store.claimOutbox(60_000)!;
   f.store.close();
-  f.db.exec("DROP TABLE feed_items; DROP TABLE feed_sources; DROP TABLE article_captures; DROP INDEX capture_origin_unique; DROP TABLE feishu_inbound_messages; DROP TABLE feishu_chats; PRAGMA user_version = 1;");
+  f.db.exec("DROP TABLE digest_feedback_events; DROP TABLE digest_feedback; DROP TABLE digest_messages; DROP TABLE feed_items; DROP TABLE feed_sources; DROP TABLE article_captures; DROP INDEX capture_origin_unique; DROP TABLE feishu_inbound_messages; DROP TABLE feishu_chats; PRAGMA user_version = 1;");
   // Deliberate conflict in a disposable DB: v2 must not commit partially.
   f.db.exec("CREATE TABLE feishu_inbound_messages (conflict TEXT)");
   assert.throws(() => openRuntimeStore({ path: f.path }));
@@ -56,7 +58,7 @@ test("v1 upgrade preserves original queues; failed migration rolls back and v2 r
   assert.equal(f.db.prepare("SELECT name FROM sqlite_master WHERE name = 'feishu_chats'").get(), undefined);
   f.db.exec("DROP TABLE feishu_inbound_messages");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 6);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
   assert.deepEqual(f.store.getTurn(turn.id), running);
   assert.deepEqual(f.store.getOutbox(outbox.id), sending);
   assert.deepEqual(f.store.getJob(job.id), job);
@@ -176,6 +178,88 @@ test("send failures back off, respect Retry-After, and stop after three attempts
   assert.equal((await deliverFeishuOnce({ store: f.store, scope, now: f.now, send: async () => {} })).outcome, "sent");
 });
 
+test("card feedback is scoped, toggles with new events, and replays safely", async t => {
+  const f = await fixture(t);
+  f.store.syncFeedSources(parseFeedConfig({ feeds: [{ id: "source", name: "Source", url: "https://example.com/feed.xml" }] }).feeds);
+  const baselineJob = f.store.ensureFeedPollJobs(1)[0];
+  const baselineClaim = f.store.claimJob(10_000, "feed_poll")!;
+  f.store.commitFeedPoll(baselineJob.id, baselineClaim.runToken!, {
+    finalUrl: "https://example.com/feed.xml", etag: null, lastModified: null, notModified: false,
+    title: "Source", siteUrl: "https://example.com", items: [{ identityKey: "old", canonicalUrl: "https://example.com/old",
+      title: "Old", summary: "old", author: null, publishedAt: 1 }],
+  });
+  f.clock.value += 2;
+  const candidateJob = f.store.ensureFeedPollJobs(1)[0];
+  const candidateClaim = f.store.claimJob(10_000, "feed_poll")!;
+  f.store.commitFeedPoll(candidateJob.id, candidateClaim.runToken!, {
+    finalUrl: "https://example.com/feed.xml", etag: null, lastModified: null, notModified: false,
+    title: "Source", siteUrl: "https://example.com", items: [{ identityKey: "new", canonicalUrl: "https://example.com/new",
+      title: "New", summary: "summary", author: null, publishedAt: 2 }],
+  });
+  const item = f.store.listFeedItems("source").find(value => value.identityKey === "new");
+  assert.ok(item);
+  const digest = buildFeedDigestCard([{ ...item, sourceName: "Source", priority: 0 }], "2026-09-29", 20)!;
+  f.store.recordDigestMessage(scope, "om_card", digest.card, [item.id]);
+  const event = (eventId: string, interested: boolean, itemId = item.id) => ({
+    app_id: scope.appId, tenant_key: scope.tenantKey, event_id: eventId,
+    context: { open_message_id: "om_card" }, operator: { open_id: scope.ownerOpenId },
+    action: { tag: "button", value: { action: "digest_interest", item_id: itemId, target_interested: interested } },
+  });
+  const entries: unknown[] = [];
+  const first = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-1", true), log: value => entries.push(value) }) as any;
+  assert.equal(first.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), true);
+  const duplicate = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-1", true), log: value => entries.push(value) }) as any;
+  assert.equal(duplicate.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  const second = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-2", false), log: value => entries.push(value) }) as any;
+  assert.equal(second.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_UNSELECTED);
+  assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), false);
+  processFeishuCardActionOnce({ store: f.store, scope, event: event("event-2", false), log: value => entries.push(value) });
+  assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), false);
+  assert.equal(processFeishuCardActionOnce({ store: f.store, scope, event: event("event-3", true, "unknown-item"), log: value => entries.push(value) }), undefined);
+  assert.ok(JSON.stringify(entries).includes("duplicate"));
+  assert.ok(!JSON.stringify(entries).includes(digest.card));
+});
+
+test("serve-feishu returns the updated card for a valid callback and drains normally", async t => {
+  const f = await fixture(t);
+  f.store.syncFeedSources(parseFeedConfig({ feeds: [{ id: "source", name: "Source", url: "https://example.com/feed.xml" }] }).feeds);
+  const baselineJob = f.store.ensureFeedPollJobs(1)[0];
+  const baselineClaim = f.store.claimJob(10_000, "feed_poll")!;
+  f.store.commitFeedPoll(baselineJob.id, baselineClaim.runToken!, {
+    finalUrl: "https://example.com/feed.xml", etag: null, lastModified: null, notModified: false,
+    title: "Source", siteUrl: "https://example.com", items: [{ identityKey: "old", canonicalUrl: "https://example.com/old",
+      title: "Old", summary: "old", author: null, publishedAt: 1 }],
+  });
+  f.clock.value += 2;
+  const candidateJob = f.store.ensureFeedPollJobs(1)[0];
+  const candidateClaim = f.store.claimJob(10_000, "feed_poll")!;
+  f.store.commitFeedPoll(candidateJob.id, candidateClaim.runToken!, {
+    finalUrl: "https://example.com/feed.xml", etag: null, lastModified: null, notModified: false,
+    title: "Source", siteUrl: "https://example.com", items: [{ identityKey: "new", canonicalUrl: "https://example.com/new",
+      title: "New", summary: "summary", author: null, publishedAt: 2 }],
+  });
+  const item = f.store.listFeedItems("source").find(value => value.identityKey === "new");
+  assert.ok(item);
+  const digest = buildFeedDigestCard([{ ...item, sourceName: "Source", priority: 0 }], "2026-09-29", 20)!;
+  f.store.recordDigestMessage(scope, "om_card", digest.card, [item.id]);
+  let receive!: (event: unknown) => Promise<unknown>;
+  const controller = new AbortController();
+  const running = serveFeishu({
+    config: { ...scope, appSecret: "never-log", statePath: f.path }, agent: async () => ({ text: "unused" }),
+    signal: controller.signal, log, openStore: () => f.store, wait: fastWait,
+    createTransport: () => ({ start: async callback => { receive = callback; }, close() {}, send: async () => {} }),
+  });
+  await eventually(() => Boolean(receive));
+  const response = await receive({ app_id: scope.appId, tenant_key: scope.tenantKey, event_id: "event-serve",
+    context: { open_message_id: "om_card" }, operator: { open_id: scope.ownerOpenId },
+    action: { tag: "button", value: { action: "digest_interest", item_id: item.id, target_interested: true } } }) as any;
+  assert.equal(response.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), true);
+  controller.abort();
+  assert.deepEqual(await running, { exitCode: 0, drained: true });
+});
+
 for (const kind of ["success", "temporary", "permanent"] as const) {
   test("expired token cannot write back " + kind, async t => {
     const f = await fixture(t);
@@ -234,7 +318,7 @@ const fastWait = (signal: AbortSignal) => delay(2, undefined, { signal }).catch(
 test("service processes real intake independently of pending Agent, delivers previous reply, and drains", async t => {
   const f = await fixture(t);
   await f.answer(input("previous"));
-  let receive!: (event: unknown) => Promise<void>;
+  let receive!: (event: unknown) => Promise<unknown>;
   let release!: (value: { text: string }) => void;
   let calls = 0, closed = false;
   const sent: string[] = [], entries: unknown[] = [];
@@ -265,7 +349,7 @@ test("service processes real intake independently of pending Agent, delivers pre
 
 test("service reports busy ingress as failure ACK and fatal storage errors stop safely", async t => {
   const f = await fixture(t);
-  let receive!: (event: unknown) => Promise<void>;
+  let receive!: (event: unknown) => Promise<unknown>;
   const controller = new AbortController();
   const entries: unknown[] = [];
   const running = serveFeishu({

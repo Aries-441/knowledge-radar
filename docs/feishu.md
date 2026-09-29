@@ -11,6 +11,16 @@
 - `im:message.p2p_msg:readonly`：读取用户发给机器人的单聊消息。
 - `im:message:send_as_bot`：以应用身份发送消息。
 
+### 摘要卡片交互
+
+每日摘要和手动预览使用 Feishu Card 2.0。每篇文章旁边的星标按钮表示当前兴趣状态：空心星点击后变为实心星，再点一次恢复空心。每次点击都提交目标状态，重复投递同一个事件不会重复改变状态，新的点击事件可以继续切换。
+
+在开发者后台打开「应用 → 事件与回调 → 回调配置」，启用卡片回调。这里不是普通的事件订阅项；服务会通过已有的长连接接收 `card.action.trigger`，校验应用、租户、授权用户、消息 ID 和受控 action，再把卡片更新结果作为长连接 ACK 返回。未启用卡片回调时，飞书会在点击按钮后提示“该应用尚未配置卡片回调”。旧的纯文本摘要和没有受控 action 的卡片会安全忽略。卡片回调不会把文章正文、完整卡片或密钥写入日志。
+
+如果点击提示中的“前往配置”后显示应用不存在，先不要新建应用。项目发送卡片使用的是 `.env` 中的 `FEISHU_APP_ID`；`lark-cli auth status` 显示的是 CLI 当前授权应用，两者可能不同。请在与项目应用相同的飞书租户中登录开发者后台，按 `.env` 中的应用 ID 搜索应用，再进入上面的回调配置；如果搜索不到，需要让该应用的管理员把当前账号加入开发者协作者，或切换到应用所属租户。
+
+卡片交互使用与订阅和对话相同的 `app_id`、`tenant_key`、`owner_open_id` 范围。更换这些身份前应先完成旧实例的队列处理，并备份状态库。
+
 [事件说明](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)、[权限列表](https://feishu.apifox.cn/doc-1939254)、[官方长连接 SDK](https://github.com/larksuite/node-sdk/blob/main/README.zh.md)。
 
 复制 `.env.example` 为 `.env`，只在本地填入：
@@ -54,7 +64,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml stop
 
 此文件可独立使用，不要叠加文章采集的 compose.yaml。非 root 用户运行，无监听端口；命名卷挂到 /var/lib/knowledge-radar，数据库固定为其下 radar.db。密钥通过环境变量注入，不会进入镜像，但本机有 Docker 管理权限的人仍可读取容器配置。
 
-每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v6，旧代码拒绝 v6；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
+每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v7，旧代码拒绝 v7；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
 
 ### 开启公开文章采集
 

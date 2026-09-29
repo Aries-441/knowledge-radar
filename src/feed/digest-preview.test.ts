@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseFeedConfig } from "./config.js";
 import { previewFeedDigestOnce } from "./digest-preview.js";
+import { DIGEST_STAR_SELECTED } from "./digest.js";
 import { openRuntimeStore } from "../runtime/store.js";
 
 const scope = { appId: "cli_0000000000000001", tenantKey: "tenant", ownerOpenId: "ou_owner" };
@@ -33,11 +34,17 @@ test("preview sends a card without creating a digest job or changing candidate s
     assert.equal(sent[0].receiveId, scope.ownerOpenId);
     assert.equal(JSON.parse(sent[0].card).schema, "2.0");
     assert.equal(store.listFeedItems("one").find(item => item.identityKey === "id:new")?.notifiedAt, null);
+    assert.ok(store.getDigestMessage(scope, "om_preview"));
+    const itemId = before.id;
+    store.applyDigestFeedback({ scope, eventId: "event-1", messageId: "om_preview", feedItemId: itemId, targetInterested: true });
     const job = store.ensureFeedDigestJob(scope, "2026-09-24", 20);
     assert.ok(job);
     assert.equal(job.state, "pending");
     assert.equal((job.payload as { version: number }).version, 2);
     assert.equal(typeof (job.payload as { card?: unknown }).card, "string");
+    const card = JSON.parse((job.payload as { card: string }).card) as { body: { elements: Array<Record<string, any>> } };
+    assert.deepEqual(card.body.elements.find(element => element.element_id === "interest_1")?.text,
+      { tag: "plain_text", content: DIGEST_STAR_SELECTED });
   } finally { store.close(); }
 });
 

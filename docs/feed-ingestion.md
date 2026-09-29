@@ -48,6 +48,8 @@ When `digest.enabled` is true, the same service creates one daily `feed_digest` 
 
 The bot needs the Feishu permission `im:message:send_as_bot`. Digest jobs use the existing SQLite lease, retry and token fencing rules. A successful send marks the selected candidates as notified; a temporary send failure keeps them pending for retry.
 
+Each sent Card 2.0 is stored with its message ID and item IDs. The star button writes a scoped interest state for the article. A repeated delivery of the same `event_id` is ignored; a later event sets the requested target state, so two clicks toggle the star. The callback requires the Card Callback setting in the Feishu Developer Console; the WS dispatcher receives `card.action.trigger` after that setting is enabled. See [飞书接入与故障排查](feishu.md#摘要卡片交互). The stored card is bounded to the Feishu 20,000-byte limit and is used to return the updated card without rebuilding article content.
+
 ## Manual preview
 
 Preview the current unnotified candidates without creating a `feed_digest` Job or changing `notified_at` or feed poll state:
@@ -60,7 +62,7 @@ The command prints `{"outcome":"sent","messageId":"..."}` after the Card 2.0 mes
 
 ## State and rollback
 
-Opening the state database migrates schema v5 to v6 in one transaction. The migration adds `kind` and validated connector configuration columns to `feed_sources`; existing rows receive `rss` and `{}` while conversations, turns, jobs, feed polls, outbox rows and feed items remain intact. Back up the SQLite database before deployment. To roll back, stop the service, restore the v5 database and the previous application image together. An older application must not open a v6 database. Keep the backup outside the state volume until the new image has passed polling and digest checks.
+Opening the state database migrates schema v6 to v7 in one transaction. The migration adds digest message records, scoped interest state and an event ledger; existing conversations, turns, jobs, feed polls, outbox rows and feed items remain intact. Back up the SQLite database before deployment. To roll back, stop the service, restore the v6 database and the previous application image together. An older application must not open a v7 database. Keep the backup outside the state volume until the new image has passed polling, digest and card callback checks.
 
 ## Verification
 
@@ -68,6 +70,22 @@ Opening the state database migrates schema v5 to v6 in one transaction. The migr
 npm test
 npm run check
 npm run build
-openspec validate add-source-connectors --strict
+openspec validate add-digest-feedback --strict
 node --env-file=.env --import tsx src/cli.ts preview-feed-digest
+```
+
+The focused callback test is deterministic and does not contact Feishu:
+
+```powershell
+npx tsx --test src/runtime/feishu-service.test.ts src/channels/feishu/adapter.test.ts
+```
+
+It covers the real SDK WebSocket ACK path, scoped message lookup, same-event replay, two-event star toggling, invalid actions, and safe logs. For a manual check, send the preview, click one star twice, restart the service, and click it again. The first click should show a filled star, the second an outlined star, and the restarted service should preserve the current state. Before trying a rollback, stop the service and copy the SQLite file; restore that backup together with the previous image because the v7 schema is rejected by older code.
+
+Validate the Compose feed overlay without injecting credentials or starting a container:
+
+```powershell
+$env:RADAR_ENV_FILE = '.env.example'
+$env:KNOWLEDGE_RADAR_FEEDS_CONFIG_HOST = 'feeds.yaml'
+docker compose -f compose.feishu.yaml -f compose.feeds.yaml config --quiet
 ```

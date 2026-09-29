@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { numberValue } from "./serialization.js";
 import { RuntimeStoreError } from "./types.js";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(operation: () => T) => T): void {
   transaction(() => {
@@ -174,5 +174,46 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
       }
       database.exec("PRAGMA user_version = 6");
     }
+    if (current < 7) database.exec(`
+      CREATE TABLE digest_messages (
+        message_id TEXT PRIMARY KEY NOT NULL CHECK (length(message_id) BETWEEN 1 AND 256),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND 128),
+        tenant_key TEXT NOT NULL CHECK (length(tenant_key) BETWEEN 1 AND 256),
+        owner_open_id TEXT NOT NULL CHECK (length(owner_open_id) BETWEEN 1 AND 256),
+        card_json TEXT NOT NULL CHECK (length(card_json) <= 20000 AND json_valid(card_json)),
+        item_ids_json TEXT NOT NULL CHECK (json_valid(item_ids_json) AND json_type(item_ids_json) = 'array'),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE digest_feedback (
+        app_id TEXT NOT NULL,
+        tenant_key TEXT NOT NULL,
+        owner_open_id TEXT NOT NULL,
+        feed_item_id TEXT NOT NULL REFERENCES feed_items(id) ON DELETE CASCADE,
+        interested INTEGER NOT NULL CHECK (interested IN (0, 1)),
+        last_message_id TEXT NOT NULL REFERENCES digest_messages(message_id),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (app_id, tenant_key, owner_open_id, feed_item_id)
+      ) STRICT;
+
+      CREATE TABLE digest_feedback_events (
+        event_id TEXT PRIMARY KEY NOT NULL CHECK (length(event_id) BETWEEN 1 AND 256),
+        app_id TEXT NOT NULL,
+        tenant_key TEXT NOT NULL,
+        owner_open_id TEXT NOT NULL,
+        message_id TEXT NOT NULL REFERENCES digest_messages(message_id),
+        feed_item_id TEXT NOT NULL REFERENCES feed_items(id) ON DELETE CASCADE,
+        target_interested INTEGER NOT NULL CHECK (target_interested IN (0, 1)),
+        received_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE INDEX digest_messages_scope_created_index
+        ON digest_messages(app_id, tenant_key, owner_open_id, created_at);
+      CREATE INDEX digest_feedback_scope_updated_index
+        ON digest_feedback(app_id, tenant_key, owner_open_id, updated_at);
+      CREATE INDEX digest_feedback_events_scope_received_index
+        ON digest_feedback_events(app_id, tenant_key, owner_open_id, received_at);
+      PRAGMA user_version = 7;
+    `);
   });
 }

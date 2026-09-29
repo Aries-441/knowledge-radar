@@ -47,7 +47,7 @@ test("v2 migration preserves old classification and every queue lease; conflicts
   const outbox = f.store.enqueueOutbox({ turnId: turn.id, kind: "final_message", payload: { text: "old" }, maxAttempts: 3 });
   const sending = f.store.claimOutbox(60_000)!;
   f.store.close();
-  f.db.exec("DROP TABLE feed_items; DROP TABLE feed_sources; DROP TABLE article_captures; DROP INDEX capture_origin_unique; PRAGMA user_version = 2");
+  f.db.exec("DROP TABLE digest_feedback_events; DROP TABLE digest_feedback; DROP TABLE digest_messages; DROP TABLE feed_items; DROP TABLE feed_sources; DROP TABLE article_captures; DROP INDEX capture_origin_unique; PRAGMA user_version = 2");
   f.db.prepare("INSERT INTO jobs SELECT 'duplicate', origin_turn_id, kind, payload_json, 'duplicate-key', result_json, error_code, state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at FROM jobs WHERE id = ?").run(job.id);
   assert.throws(() => openRuntimeStore({ path: f.path }));
   assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 2);
@@ -55,7 +55,7 @@ test("v2 migration preserves old classification and every queue lease; conflicts
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM jobs").get()?.n, 2);
   f.db.exec("DELETE FROM jobs WHERE id = 'duplicate'");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 6);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
   assert.deepEqual(f.store.getTurn(turn.id), turn);
   assert.deepEqual(f.store.getJob(job.id), running);
   assert.deepEqual(f.store.getOutbox(outbox.id), sending);
@@ -63,7 +63,7 @@ test("v2 migration preserves old classification and every queue lease; conflicts
   assert.equal(replay.outcome, "duplicate");
   assert.equal(f.store.getTurn(turn.id)?.source, "feishu");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 6);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
   assert.throws(() => f.db.prepare("INSERT INTO article_captures VALUES (?, ?)").run(job.id, "bad-json"));
 });
 

@@ -32,7 +32,7 @@ export async function processFeedDigestOnce({ store, config, scope, send, sendIn
     const content = useCard ? digest.card! : digest.text;
     if (!content) throw new FeishuError("feishu_invalid_payload");
     const response = await sender(digest.scope.ownerOpenId, content, uuid);
-    const committed = store.commitFeedDigest(job.id, token, scope, response.messageId);
+    const committed = store.commitFeedDigest(job.id, token, scope, response.messageId, useCard ? digest.card : undefined);
     const outcome = committed ? "succeeded" : "lost_lease";
     log({ event: "feed_digest", phase: "commit", outcome, job_id: job.id });
     return { outcome, jobId: job.id };

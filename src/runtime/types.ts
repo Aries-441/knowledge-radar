@@ -15,6 +15,22 @@ export type CaptureContext = {
 
 export type FeishuScope = { appId: string; tenantKey: string; ownerOpenId: string };
 export type FeishuText = FeishuScope & { chatId: string; messageId: string; text: string };
+export type DigestMessage = FeishuScope & {
+  messageId: string;
+  card: string;
+  itemIds: string[];
+  createdAt: number;
+};
+export type DigestFeedbackState = FeishuScope & {
+  feedItemId: string;
+  interested: boolean;
+  lastMessageId: string;
+  updatedAt: number;
+};
+export type DigestFeedbackResult = {
+  outcome: "applied" | "duplicate";
+  interested: boolean;
+};
 export type FeishuAcceptance =
   | { outcome: "accepted" | "duplicate"; conversationId: string; turnId: string }
   | { outcome: "ignored"; reason: "identity_conflict" | "conversation_archived" };
