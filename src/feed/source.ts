@@ -1,8 +1,9 @@
 import type { FeedSource } from "../runtime/types.js";
+import { fetchGithubTrending } from "./github-trending.js";
 import { fetchFeed, type FeedFetchOptions, type ParsedFeed } from "./parser.js";
 
 /** Source kinds are intentionally closed until a connector is implemented and tested. */
-export const SOURCE_KINDS = ["rss"] as const;
+export const SOURCE_KINDS = ["rss", "github_trending"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
 
 export type SourceConfig = {
@@ -45,9 +46,17 @@ const rssConnector: SourceConnector = {
   },
 };
 
+const githubTrendingConnector: SourceConnector = {
+  kind: "github_trending",
+  fetch(source, options = {}) {
+    return fetchGithubTrending(source, options);
+  },
+};
+
 /** Explicit registry: configuration never selects arbitrary modules or URL heuristics. */
 export const sourceConnectorRegistry: ReadonlyMap<string, SourceConnector> = new Map([
   [rssConnector.kind, rssConnector],
+  [githubTrendingConnector.kind, githubTrendingConnector],
 ]);
 
 export function getSourceConnector(kind: string): SourceConnector {

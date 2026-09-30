@@ -13,7 +13,7 @@ const feeds = [
   { id: "off", name: "Off", url: "https://example.com/off.xml", enabled: false, priority: 2, tags: [], itemLimit: 20 },
 ];
 
-function parsed(items: { identityKey: string; canonicalUrl: string | null; title: string; summary: string; author: string | null; publishedAt: number | null }[]) {
+function parsed(items: { identityKey: string; canonicalUrl: string | null; title: string; summary: string; author: string | null; publishedAt: number | null; metadata?: Record<string, string | number | boolean | null> }[]) {
   return { finalUrl: "https://example.com/one.xml", etag: "v1", lastModified: null, notModified: false, title: "One", siteUrl: "https://example.com", items };
 }
 
@@ -72,6 +72,7 @@ test("commits first successful feed as baseline and later identities as candidat
     const result = store.commitFeedPoll(firstJob.id, firstClaim.runToken!, first);
     assert.deepEqual(result && { baseline: result.baseline, newItems: result.newItems }, { baseline: true, newItems: 2 });
     assert.deepEqual(store.listFeedItems("one").map(item => item.state), ["baseline", "baseline"]);
+    assert.deepEqual(store.listFeedItems("one").map(item => item.metadata), [{}, {}]);
     const firstSeen = store.listFeedItems("one")[0].firstSeenAt;
 
     clock.now += 60_001;
@@ -91,7 +92,31 @@ test("commits first successful feed as baseline and later identities as candidat
     assert.equal(items.find(item => item.identityKey === "id:a")?.state, "baseline");
     assert.equal(items.find(item => item.identityKey === "id:a")?.canonicalUrl, "https://example.com/a-new");
     assert.equal(items.find(item => item.identityKey === "id:c")?.state, "candidate");
+    assert.deepEqual(items.find(item => item.identityKey === "id:c")?.metadata, {});
     assert.equal(store.getJob(secondJob.id)?.state, "succeeded");
+  } finally { store.close(); }
+});
+
+test("persists bounded connector metadata and rejects oversized metadata", () => {
+  const { store } = setup();
+  try {
+    store.syncFeedSources([feeds[0]]);
+    const job = store.ensureFeedPollJobs(60_000)[0];
+    const claim = store.claimJob(10_000, "feed_poll")!;
+    store.commitFeedPoll(job.id, claim.runToken!, parsed([{
+      identityKey: "github:owner/repo", canonicalUrl: "https://github.com/owner/repo", title: "owner/repo",
+      summary: "A repo", author: "owner", publishedAt: null,
+      metadata: { provider: "github_trending", rank: 1, starsDelta: 120, starsPeriod: "this week" },
+    }]));
+    assert.deepEqual(store.listFeedItems("one")[0].metadata, {
+      provider: "github_trending", rank: 1, starsDelta: 120, starsPeriod: "this week",
+    });
+    const secondJob = store.enqueueJob({ kind: "feed_poll", payload: { sourceId: "one" }, idempotencyKey: "oversized-metadata", maxAttempts: 1 });
+    const secondClaim = store.claimJob(10_000, "feed_poll")!;
+    assert.throws(() => store.commitFeedPoll(secondJob.id, secondClaim.runToken!, parsed([{
+      identityKey: "id:large", canonicalUrl: null, title: "large", summary: "", author: null, publishedAt: null,
+      metadata: { value: "x".repeat(513) },
+    }])), /metadata value is too long/);
   } finally { store.close(); }
 });
 

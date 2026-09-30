@@ -17,7 +17,7 @@ Knowledge Radar 运行在一台长期在线的个人电脑上，服务单个用�
 flowchart LR
     User[用户] <--> Feishu[飞书]
     Feishu <--> Radar[Knowledge Radar]
-    Feeds[博客 / RSS / Atom] --> Radar
+    Feeds[博客 / RSS / Atom / GitHub Trending] --> Radar
     PublicWeb[公开网页] --> Radar
     AuthWeb[需要登录的网页] --> Browser
     Radar <--> Model[模型服务]

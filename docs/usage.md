@@ -12,7 +12,7 @@ Knowledge Radar 是一个面向个人使用的自托管知识收件箱：通过�
 手机发送链接 → 确认接收 → 后台采集与总结 → Markdown 归档 → 飞书返回结果
 ```
 
-> 项目处于早期可用阶段。飞书聊天、公开文章采集和 RSS / Atom 订阅已实现；登录态浏览、话题切换和可视化页面仍在计划中。实际验证范围见[验收记录](url-capture-verification.md)。
+> 项目处于早期可用阶段。飞书聊天、公开文章采集、RSS / Atom 和 GitHub Trending 订阅已实现；登录态浏览、话题切换和可视化页面仍在计划中。实际验证范围见[验收记录](url-capture-verification.md)。
 
 ## 现在能做什么
 

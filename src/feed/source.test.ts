@@ -27,6 +27,7 @@ const lookup = async (_hostname: string, _options: { all: true; verbatim: true }
 test("registry resolves only explicitly registered source kinds", () => {
   assert.ok(sourceConnectorRegistry.has("rss"));
   assert.equal(getSourceConnector("rss").kind, "rss");
+  assert.equal(getSourceConnector("github_trending").kind, "github_trending");
   assert.throws(() => getSourceConnector("github"), (error: unknown) => {
     assert.ok(error instanceof SourceConnectorError);
     assert.equal(error.code, "source_connector_unregistered");

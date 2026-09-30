@@ -18,6 +18,19 @@ const input = (messageId = "message", chatId = "chat", text = "hello"): FeishuTe
 const log: SafeLog = () => {};
 const alive = new AbortController().signal;
 
+function cardButton(card: { body: { elements: Array<Record<string, any>> } }, elementId: string) {
+  for (const element of card.body.elements) {
+    if (element.element_id === elementId) return element;
+    if (element.tag === "column_set") {
+      for (const column of element.columns ?? []) {
+        const button = column.elements?.find((candidate: Record<string, any>) => candidate.element_id === elementId);
+        if (button) return button;
+      }
+    }
+  }
+  return undefined;
+}
+
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), "radar-feishu-test-"));
   const path = join(directory, "radar.db");
@@ -58,7 +71,7 @@ test("v1 upgrade preserves original queues; failed migration rolls back and v2 r
   assert.equal(f.db.prepare("SELECT name FROM sqlite_master WHERE name = 'feishu_chats'").get(), undefined);
   f.db.exec("DROP TABLE feishu_inbound_messages");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 8);
   assert.deepEqual(f.store.getTurn(turn.id), running);
   assert.deepEqual(f.store.getOutbox(outbox.id), sending);
   assert.deepEqual(f.store.getJob(job.id), job);
@@ -207,12 +220,12 @@ test("card feedback is scoped, toggles with new events, and replays safely", asy
   });
   const entries: unknown[] = [];
   const first = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-1", true), log: value => entries.push(value) }) as any;
-  assert.equal(first.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  assert.equal(cardButton(first.card.data, "interest_1").text.content, DIGEST_STAR_SELECTED);
   assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), true);
   const duplicate = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-1", true), log: value => entries.push(value) }) as any;
-  assert.equal(duplicate.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  assert.equal(cardButton(duplicate.card.data, "interest_1").text.content, DIGEST_STAR_SELECTED);
   const second = processFeishuCardActionOnce({ store: f.store, scope, event: event("event-2", false), log: value => entries.push(value) }) as any;
-  assert.equal(second.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_UNSELECTED);
+  assert.equal(cardButton(second.card.data, "interest_1").text.content, DIGEST_STAR_UNSELECTED);
   assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), false);
   processFeishuCardActionOnce({ store: f.store, scope, event: event("event-2", false), log: value => entries.push(value) });
   assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), false);
@@ -254,7 +267,7 @@ test("serve-feishu returns the updated card for a valid callback and drains norm
   const response = await receive({ app_id: scope.appId, tenant_key: scope.tenantKey, event_id: "event-serve",
     context: { open_message_id: "om_card" }, operator: { open_id: scope.ownerOpenId },
     action: { tag: "button", value: { action: "digest_interest", item_id: item.id, target_interested: true } } }) as any;
-  assert.equal(response.card.data.body.elements.find((element: any) => element.element_id === "interest_1").text.content, DIGEST_STAR_SELECTED);
+  assert.equal(cardButton(response.card.data, "interest_1").text.content, DIGEST_STAR_SELECTED);
   assert.equal(f.store.listDigestFeedbackStates(scope).get(item.id), true);
   controller.abort();
   assert.deepEqual(await running, { exitCode: 0, drained: true });

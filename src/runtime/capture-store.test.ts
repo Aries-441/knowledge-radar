@@ -55,7 +55,7 @@ test("v2 migration preserves old classification and every queue lease; conflicts
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM jobs").get()?.n, 2);
   f.db.exec("DELETE FROM jobs WHERE id = 'duplicate'");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 8);
   assert.deepEqual(f.store.getTurn(turn.id), turn);
   assert.deepEqual(f.store.getJob(job.id), running);
   assert.deepEqual(f.store.getOutbox(outbox.id), sending);
@@ -63,7 +63,7 @@ test("v2 migration preserves old classification and every queue lease; conflicts
   assert.equal(replay.outcome, "duplicate");
   assert.equal(f.store.getTurn(turn.id)?.source, "feishu");
   f.reopen();
-  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 7);
+  assert.equal(f.db.prepare("PRAGMA user_version").get()?.user_version, 8);
   assert.throws(() => f.db.prepare("INSERT INTO article_captures VALUES (?, ?)").run(job.id, "bad-json"));
 });
 

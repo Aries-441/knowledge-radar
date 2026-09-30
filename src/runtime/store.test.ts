@@ -50,7 +50,7 @@ test("migrates, persists records, and rejects a future database version", async 
 
   const futurePath = join(directory, "future.db");
   const future = new DatabaseSync(futurePath);
-  future.exec("PRAGMA user_version = 8");
+  future.exec("PRAGMA user_version = 9");
   future.close();
   assert.throws(() => openRuntimeStore({ path: futurePath }), RuntimeStoreError);
 });

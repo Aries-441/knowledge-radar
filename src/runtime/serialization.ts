@@ -1,4 +1,4 @@
-import { type Conversation, type FeedItem, type FeedSource, type Job, type Outbox, RuntimeStoreError, StorageBusyError, type Turn } from "./types.js";
+import { type Conversation, type FeedItem, type FeedItemMetadata, type FeedSource, type Job, type Outbox, RuntimeStoreError, StorageBusyError, type Turn } from "./types.js";
 
 export function conversationFromRow(row: Record<string, unknown>): Conversation {
   return {
@@ -78,6 +78,8 @@ export function feedSourceFromRow(row: Record<string, unknown>): FeedSource {
 }
 
 export function feedItemFromRow(row: Record<string, unknown>): FeedItem {
+  const metadataValue = row.metadata_json === undefined ? "{}" : textValue(row, "metadata_json");
+  const metadata = decodeFeedItemMetadata(metadataValue);
   return {
     id: textValue(row, "id"),
     feedId: textValue(row, "feed_id"),
@@ -87,6 +89,7 @@ export function feedItemFromRow(row: Record<string, unknown>): FeedItem {
     summary: nullableTextValue(row, "summary"),
     author: nullableTextValue(row, "author"),
     publishedAt: nullableNumberValue(row, "published_at"),
+    metadata,
     firstSeenAt: numberValue(row, "first_seen_at"),
     state: textValue(row, "state") as FeedItem["state"],
     notifiedAt: nullableNumberValue(row, "notified_at"),
@@ -146,6 +149,14 @@ export function encodeJson(value: unknown, name: string): string {
   return encoded;
 }
 
+/** Metadata is deliberately scalar and small so a connector cannot persist an unbounded payload. */
+export function encodeFeedItemMetadata(value: unknown): string {
+  const metadata = normalizeFeedItemMetadata(value);
+  const encoded = encodeJson(metadata, "item.metadata");
+  if (Buffer.byteLength(encoded, "utf8") > 4_096) throw new RangeError("item.metadata exceeds 4096 bytes");
+  return encoded;
+}
+
 export function numberValue(row: Record<string, unknown> | undefined, name: string): number {
   const value = row?.[name];
   if (typeof value !== "number") throw new RuntimeStoreError(`Database column ${name} is not a number`);
@@ -165,6 +176,36 @@ function decodeJson(value: string, name: string): unknown {
   } catch {
     throw new RuntimeStoreError(`${name} contains invalid JSON`);
   }
+}
+
+function decodeFeedItemMetadata(value: string): FeedItemMetadata {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new RuntimeStoreError("Feed item metadata contains invalid JSON"); }
+  try { return normalizeFeedItemMetadata(parsed); }
+  catch { throw new RuntimeStoreError("Feed item metadata is invalid"); }
+}
+
+function normalizeFeedItemMetadata(value: unknown): FeedItemMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("metadata must be an object");
+  const entries = Object.entries(value);
+  if (entries.length > 32) throw new RangeError("metadata has too many fields");
+  const result: FeedItemMetadata = {};
+  for (const [key, item] of entries) {
+    if (!key || key.length > 80) throw new RangeError("metadata key is too long");
+    if (typeof item === "string") {
+      if (item.length > 512) throw new RangeError("metadata value is too long");
+      result[key] = item;
+    } else if (typeof item === "number") {
+      if (!Number.isFinite(item)) throw new TypeError("metadata number is invalid");
+      result[key] = item;
+    } else if (typeof item === "boolean" || item === null) {
+      result[key] = item;
+    } else {
+      throw new TypeError("metadata values must be scalar");
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > 4_096) throw new RangeError("metadata is too large");
+  return result;
 }
 
 export function textValue(row: Record<string, unknown> | undefined, name: string): string {

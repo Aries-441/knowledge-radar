@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { numberValue } from "./serialization.js";
 import { RuntimeStoreError } from "./types.js";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(operation: () => T) => T): void {
   transaction(() => {
@@ -142,6 +142,7 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
         summary TEXT CHECK (summary IS NULL OR length(summary) <= 8192),
         author TEXT CHECK (author IS NULL OR length(author) <= 512),
         published_at INTEGER,
+        metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json) AND length(metadata_json) <= 4096),
         first_seen_at INTEGER NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('baseline', 'candidate')),
         error_code TEXT CHECK (error_code IS NULL OR length(error_code) <= 128),
@@ -215,5 +216,11 @@ export function migrateRuntimeSchema(database: DatabaseSync, transaction: <T>(op
         ON digest_feedback_events(app_id, tenant_key, owner_open_id, received_at);
       PRAGMA user_version = 7;
     `);
+    if (current < 8) {
+      if (!database.prepare("PRAGMA table_info(feed_items)").all().some(row => row.name === "metadata_json")) {
+        database.exec("ALTER TABLE feed_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
+      }
+      database.exec("PRAGMA user_version = 8");
+    }
   });
 }

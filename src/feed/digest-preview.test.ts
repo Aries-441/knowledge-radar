@@ -8,6 +8,19 @@ import { openRuntimeStore } from "../runtime/store.js";
 const scope = { appId: "cli_0000000000000001", tenantKey: "tenant", ownerOpenId: "ou_owner" };
 const config = parseFeedConfig({ timezone: "Asia/Shanghai", feeds: [{ id: "one", name: "One", url: "https://example.com/one.xml" }] });
 
+function cardButton(card: { body: { elements: Array<Record<string, any>> } }, elementId: string) {
+  for (const element of card.body.elements) {
+    if (element.element_id === elementId) return element;
+    if (element.tag === "column_set") {
+      for (const column of element.columns ?? []) {
+        const button = column.elements?.find((candidate: Record<string, any>) => candidate.element_id === elementId);
+        if (button) return button;
+      }
+    }
+  }
+  return undefined;
+}
+
 test("preview sends a card without creating a digest job or changing candidate state", async () => {
   const clock = { now: Date.parse("2026-09-24T02:00:00Z") };
   const store = openRuntimeStore({ path: ":memory:", now: () => clock.now });
@@ -43,7 +56,7 @@ test("preview sends a card without creating a digest job or changing candidate s
     assert.equal((job.payload as { version: number }).version, 2);
     assert.equal(typeof (job.payload as { card?: unknown }).card, "string");
     const card = JSON.parse((job.payload as { card: string }).card) as { body: { elements: Array<Record<string, any>> } };
-    assert.deepEqual(card.body.elements.find(element => element.element_id === "interest_1")?.text,
+    assert.deepEqual(cardButton(card, "interest_1")?.text,
       { tag: "plain_text", content: DIGEST_STAR_SELECTED });
   } finally { store.close(); }
 });

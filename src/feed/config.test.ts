@@ -10,7 +10,9 @@ import {
   FeedConfigError,
   loadFeedConfig,
   parseFeedConfig,
+  getDigestSchedules,
 } from "./config.js";
+import { getDigestPeriod, isDigestScheduleDue } from "./digest-period.js";
 
 const goodFeed = { id: "sample", name: "Sample", url: "https://example.com/feed.xml" };
 
@@ -24,7 +26,6 @@ test("uses safe defaults for omitted global and per-feed optional fields", () =>
   });
   assert.deepEqual(parseFeedConfig({}).sources, []);
 });
-
 test("normalizes the sources entry and rejects ambiguous or unsupported connector configuration", () => {
   const config = parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss" }] });
   assert.equal(config.sources[0]?.kind, "rss");
@@ -33,6 +34,19 @@ test("normalizes the sources entry and rejects ambiguous or unsupported connecto
   assert.throws(() => parseFeedConfig({ feeds: [goodFeed], sources: [{ ...goodFeed, kind: "rss" }] }), FeedConfigError);
   assert.throws(() => parseFeedConfig({ sources: [{ ...goodFeed, kind: "github" }] }), FeedConfigError);
   assert.throws(() => parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss", connectorConfig: { tokenEnv: "TOKEN" } }] }), FeedConfigError);
+});
+
+test("normalizes GitHub Trending sources with a weekly default and rejects unsafe options", () => {
+  const config = parseFeedConfig({ sources: [{ id: "github", name: "GitHub Trending", url: "https://github.com/trending", kind: "github_trending" }] });
+  assert.deepEqual(config.sources[0], {
+    id: "github", name: "GitHub Trending", url: "https://github.com/trending", kind: "github_trending",
+    connectorConfig: { period: "weekly", language: "all" }, enabled: true, priority: 0, tags: [], itemLimit: DEFAULT_FEED_ITEM_LIMIT,
+  });
+  assert.throws(() => parseFeedConfig({ sources: [{ id: "github", name: "GitHub", url: "http://github.com/trending", kind: "github_trending" }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ id: "github", name: "GitHub", url: "https://user:secret@github.com/trending", kind: "github_trending" }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ id: "github", name: "GitHub", url: "https://github.com/trending", kind: "github_trending", connectorConfig: { period: "yearly" } }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ id: "github", name: "GitHub", url: "https://github.com/trending", kind: "github_trending", connectorConfig: { token: "secret" } }] }), FeedConfigError);
+  assert.throws(() => parseFeedConfig({ sources: [{ id: "github", name: "GitHub", url: "https://github.com/trending", kind: "github_trending", connectorConfig: { language: "../secret" } }] }), FeedConfigError);
 });
 
 test("parses optional daily digest configuration and validates its bounds", () => {
@@ -44,6 +58,37 @@ test("parses optional daily digest configuration and validates its bounds", () =
   for (const value of [0, 51]) {
     assert.throws(() => parseFeedConfig({ digest: { enabled: true, time: "09:00", maxItems: value } }), FeedConfigError);
   }
+});
+
+test("normalizes legacy digest and validates periodic schedule references", () => {
+  const config = parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss" }], digest: { enabled: true, time: "09:00", maxItems: 10 } });
+  assert.deepEqual(getDigestSchedules(config)[0], { id: "default-daily", mode: "new_items", frequency: "daily", time: "09:00", maxItems: 10, sourceIds: ["sample"] });
+  const scheduled = parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss" }], digest: { schedules: [{ id: "daily", mode: "new_items", frequency: "daily", time: "09:00", maxItems: 10, sourceIds: ["sample"] }] } });
+  assert.equal(scheduled.digest?.schedules?.[0]?.id, "daily");
+  assert.throws(() => parseFeedConfig({ sources: [{ ...goodFeed, kind: "rss" }], digest: { schedules: [{ id: "x", mode: "new_items", frequency: "weekly", time: "09:00", maxItems: 1, sourceIds: ["missing"], weekday: 1 }] } }), FeedConfigError);
+});
+
+test("computes timezone-aware daily, ISO weekly, and anchored windows", () => {
+  const base = new Date("2024-01-01T12:00:00Z");
+  const daily = getDigestPeriod({ id: "d", mode: "new_items", frequency: "daily", time: "09:00", maxItems: 1, sourceIds: ["sample"] }, base, "America/New_York");
+  assert.equal(daily.key, "2024-01-01");
+  const weekly = getDigestPeriod({ id: "w", mode: "trend_snapshot", frequency: "weekly", weekday: 1, time: "09:00", maxItems: 1, sourceIds: ["sample"] }, new Date("2024-01-08T15:00:00Z"), "UTC");
+  assert.equal(weekly.key, "2024-W02");
+  const four = getDigestPeriod({ id: "f", mode: "period_summary", frequency: "every_n_weeks", anchorDate: "2024-01-01", intervalWeeks: 4, time: "09:00", maxItems: 1, sourceIds: [] }, new Date("2024-01-29T01:00:00Z"), "UTC");
+  assert.equal(four.key, "2024-01-01/2024-01-28");
+});
+
+test("only marks the configured weekly and anchored windows as due", () => {
+  const weekly = { id: "w", mode: "trend_snapshot" as const, frequency: "weekly" as const,
+    weekday: 1, time: "09:00", maxItems: 1, sourceIds: ["sample"] };
+  assert.equal(isDigestScheduleDue(weekly, new Date("2024-01-08T08:59:00Z"), "UTC"), false);
+  assert.equal(isDigestScheduleDue(weekly, new Date("2024-01-08T09:00:00Z"), "UTC"), true);
+  assert.equal(isDigestScheduleDue(weekly, new Date("2024-01-09T09:00:00Z"), "UTC"), false);
+  const four = { id: "f", mode: "period_summary" as const, frequency: "every_n_weeks" as const,
+    anchorDate: "2024-01-29", intervalWeeks: 4, time: "09:00", maxItems: 1, sourceIds: [] };
+  assert.equal(isDigestScheduleDue(four, new Date("2024-01-28T09:00:00Z"), "UTC"), false);
+  assert.equal(isDigestScheduleDue(four, new Date("2024-01-29T09:00:00Z"), "UTC"), true);
+  assert.equal(isDigestScheduleDue(four, new Date("2024-02-26T09:00:00Z"), "UTC"), true);
 });
 
 test("rejects duplicate IDs", () => {

@@ -2,17 +2,29 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import Parser from "rss-parser";
+import type { FeedItemMetadata } from "../runtime/types.js";
 
 export type FeedCache = { etag: string | null; lastModified: string | null };
 export type FeedLookup = (hostname: string, options: { all: true; verbatim: true }) => Promise<Array<{ address: string; family: number }>>;
 export type FeedFetchOptions = {
   sourceId?: string;
+  /** Override the content types advertised to a connector's upstream. */
+  accept?: string;
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   lookup?: FeedLookup;
+};
+
+export type BoundedFetchResult = {
+  finalUrl: string;
+  response: Response | null;
+  body: string;
+  etag: string | null;
+  lastModified: string | null;
+  notModified: boolean;
 };
 
 export type NormalizedFeedItem = {
@@ -22,6 +34,8 @@ export type NormalizedFeedItem = {
   summary: string;
   author: string | null;
   publishedAt: number | null;
+  /** Connector-specific, bounded scalar metadata. RSS items leave this empty. */
+  metadata?: FeedItemMetadata;
 };
 
 export type ParsedFeed = {
@@ -178,7 +192,7 @@ export async function parseFeed(sourceId: string, finalUrl: string, xml: string,
     const summary = text(raw.contentSnippet ?? raw.contentEncoded ?? raw.content ?? raw.summary ?? raw.description, 8_192);
     const author = text(raw.creator ?? raw.author, 512) || null;
     const identityKey = itemIdentity(sourceId, raw, canonicalUrl, title, publishedAt);
-    items.push({ identityKey, canonicalUrl, title, summary, author, publishedAt });
+    items.push({ identityKey, canonicalUrl, title, summary, author, publishedAt, metadata: {} });
   }
   const unique = new Map<string, NormalizedFeedItem>();
   for (const item of items) {
@@ -204,7 +218,8 @@ export async function parseFeed(sourceId: string, finalUrl: string, xml: string,
   };
 }
 
-export async function fetchFeed(url: string, cache: FeedCache, options: FeedFetchOptions = {}): Promise<ParsedFeed> {
+/** Fetches one public HTTP resource with the same bounds used by RSS sources. */
+export async function fetchBoundedResource(url: string, cache: FeedCache, options: FeedFetchOptions = {}): Promise<BoundedFetchResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const lookup = options.lookup ?? dnsLookup;
   const maxRedirects = options.maxRedirects ?? 5;
@@ -212,7 +227,9 @@ export async function fetchFeed(url: string, cache: FeedCache, options: FeedFetc
   const timeoutMs = options.timeoutMs ?? 20_000;
   let current = url;
   let response: Response | undefined;
-  const requestHeaders = new Headers({ accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8" });
+  const requestHeaders = new Headers({
+    accept: options.accept ?? "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8",
+  });
   if (cache.etag) requestHeaders.set("if-none-match", cache.etag);
   if (cache.lastModified) requestHeaders.set("if-modified-since", cache.lastModified);
   for (let redirect = 0; redirect <= maxRedirects; redirect++) {
@@ -228,13 +245,11 @@ export async function fetchFeed(url: string, cache: FeedCache, options: FeedFetc
         continue;
       }
       if (response.status === 304) {
-        return { finalUrl: current, etag: boundedHeader(response.headers, "etag", 1_024, cache.etag), lastModified: boundedHeader(response.headers, "last-modified", 256, cache.lastModified), notModified: true, title: null, siteUrl: null, items: [] };
+        return { finalUrl: current, response, body: "", etag: boundedHeader(response.headers, "etag", 1_024, cache.etag), lastModified: boundedHeader(response.headers, "last-modified", 256, cache.lastModified), notModified: true };
       }
       if (!response.ok) throw new FeedFetchError("feed_http_error", response.status === 408 || response.status === 429 || response.status >= 500, response.status);
-      const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-      if (contentType && !/(xml|rss|atom|text\/plain)/.test(contentType)) throw new FeedFetchError("feed_invalid_content", false, response.status);
       const body = await readBody(response, maxBytes);
-      return await parseFeed(options.sourceId ?? url, current, body, response.headers);
+      return { finalUrl: current, response, body, etag: boundedHeader(response.headers, "etag", 1_024), lastModified: boundedHeader(response.headers, "last-modified", 256), notModified: false };
     } catch (error) {
       if (control.signal.aborted) throw new FeedFetchError("feed_timeout", true);
       if (error instanceof FeedFetchError) throw error;
@@ -242,4 +257,14 @@ export async function fetchFeed(url: string, cache: FeedCache, options: FeedFetc
     } finally { control.close(); }
   }
   throw new FeedFetchError("feed_redirect_limit", false);
+}
+
+export async function fetchFeed(url: string, cache: FeedCache, options: FeedFetchOptions = {}): Promise<ParsedFeed> {
+  const result = await fetchBoundedResource(url, cache, options);
+  if (result.notModified) {
+    return { finalUrl: result.finalUrl, etag: result.etag, lastModified: result.lastModified, notModified: true, title: null, siteUrl: null, items: [] };
+  }
+  const contentType = (result.response?.headers.get("content-type") ?? "").toLowerCase();
+  if (contentType && !/(xml|rss|atom|text\/plain)/.test(contentType)) throw new FeedFetchError("feed_invalid_content", false, result.response?.status);
+  return await parseFeed(options.sourceId ?? url, result.finalUrl, result.body, result.response?.headers ?? new Headers());
 }

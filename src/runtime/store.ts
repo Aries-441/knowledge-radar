@@ -5,7 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { classifyCaptureRequest } from "../article/request.js";
 import { validateCheckpoint, displayTitle, type CaptureCheckpoint } from "../article/durable-archive.js";
 import { captureFailureText, captureReasons, type CaptureErrorCode } from "../article/capture-error.js";
-import { normalizeSourceConfig, type FeedSourceConfig } from "../feed/config.js";
+import { normalizeSourceConfig, type FeedSourceConfig, type DigestSchedule } from "../feed/config.js";
+import type { DigestPeriod } from "../feed/digest-period.js";
 import type { SourceConfig } from "../feed/source.js";
 import type { ParsedFeed } from "../feed/parser.js";
 import { buildFeedDigest, type DigestCandidate, type DigestPayload } from "../feed/digest.js";
@@ -13,6 +14,7 @@ import type { CaptureContext } from "./types.js";
 
 import {
   conversationFromRow,
+  encodeFeedItemMetadata,
   encodeJson,
   feedItemFromRow,
   feedSourceFromRow,
@@ -83,6 +85,7 @@ export type {
   EnqueueJobInput,
   EnqueueOutboxInput,
   FeedItem,
+  FeedItemMetadata,
   FeedSource,
   Job,
   Outbox,
@@ -442,14 +445,16 @@ export class RuntimeStore {
           const itemId = existing ? textValue(existing, "id") : this.newId();
           this.database.prepare(
             `INSERT INTO feed_items
-              (id, feed_id, identity_key, canonical_url, title, summary, author, published_at, first_seen_at,
+              (id, feed_id, identity_key, canonical_url, title, summary, author, published_at, metadata_json, first_seen_at,
                state, error_code, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
              ON CONFLICT(feed_id, identity_key) DO UPDATE SET canonical_url = excluded.canonical_url,
                title = excluded.title, summary = excluded.summary, author = excluded.author,
-               published_at = excluded.published_at, error_code = NULL, updated_at = excluded.updated_at`,
+               published_at = excluded.published_at, metadata_json = excluded.metadata_json,
+               error_code = NULL, updated_at = excluded.updated_at`,
           ).run(itemId, feedId, item.identityKey, item.canonicalUrl, item.title, item.summary || null, item.author,
-            item.publishedAt, now, baseline ? "baseline" : "candidate", now, now);
+            item.publishedAt, encodeFeedItemMetadata(item.metadata ?? {}), now,
+            baseline ? "baseline" : "candidate", now, now);
         }
       }
       const baselineAt = baseline && !parsed.notModified ? now : source.baselineAt;
@@ -486,19 +491,56 @@ export class RuntimeStore {
     });
   }
 
-  listFeedDigestCandidates(scope: FeishuScope): DigestCandidate[] {
+  listFeedDigestCandidates(scope: FeishuScope, sourceIds?: string[]): DigestCandidate[] {
     // ponytail: bounded single-user subscriptions; add a URL delivery index if history makes this scan expensive.
+    const ids = sourceIds?.map(id => requireText(id, "sourceId"));
+    const sourceFilter = ids && ids.length > 0 ? ` AND s.id IN (${ids.map(() => "?").join(", ")})` : "";
     return this.database.prepare(`
-      SELECT i.*, s.display_name AS source_name, s.priority FROM feed_items i
+      SELECT i.*, s.display_name AS source_name, s.kind AS source_kind, s.priority FROM feed_items i
       JOIN feed_sources s ON s.id = i.feed_id
-      WHERE i.state = 'candidate' AND i.notified_at IS NULL AND s.enabled = 1
+      WHERE i.state = 'candidate' AND i.notified_at IS NULL AND s.enabled = 1${sourceFilter}
         AND NOT EXISTS (
           SELECT 1 FROM jobs, json_each(payload_json, '$.canonicalUrls') link
           WHERE kind = 'feed_digest' AND state = 'succeeded' AND ${DIGEST_SCOPE_SQL}
             AND link.value = i.canonical_url
         )
-    `).all(...this.feishuScopeParams(scope)).map(row => ({ ...feedItemFromRow(row),
-      sourceName: textValue(row, "source_name"), priority: numberValue(row, "priority") }));
+    `).all(...(ids ?? []), ...this.feishuScopeParams(scope)).map(row => ({ ...feedItemFromRow(row),
+      sourceName: textValue(row, "source_name"), sourceKind: textValue(row, "source_kind"), priority: numberValue(row, "priority") }));
+  }
+
+  listFeedDigestSnapshot(sourceIds: string[]): DigestCandidate[] {
+    const ids = sourceIds.map(id => requireText(id, "sourceId"));
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    return this.database.prepare(`
+      SELECT i.*, s.display_name AS source_name, s.kind AS source_kind, s.priority
+      FROM feed_items i
+      JOIN feed_sources s ON s.id = i.feed_id
+      WHERE s.enabled = 1 AND s.last_success_at IS NOT NULL AND s.id IN (${placeholders})
+    `).all(...ids).map(row => ({ ...feedItemFromRow(row),
+      sourceName: textValue(row, "source_name"), sourceKind: textValue(row, "source_kind"), priority: numberValue(row, "priority") }));
+  }
+
+  listFeedDigestHistory(scope: FeishuScope, sourceScheduleId: string, periodStart: string, periodEnd: string): DigestCandidate[] {
+    const scheduleId = requireText(sourceScheduleId, "sourceScheduleId");
+    const rows = this.database.prepare(`
+      SELECT payload_json FROM jobs
+      WHERE kind = 'feed_digest' AND state = 'succeeded'
+        AND json_extract(payload_json, '$.scheduleId') = ?
+        AND json_extract(payload_json, '$.mode') = 'trend_snapshot'
+        AND json_extract(payload_json, '$.periodEnd') >= ?
+        AND json_extract(payload_json, '$.periodEnd') <= ?
+        AND ${DIGEST_SCOPE_SQL}
+      ORDER BY json_extract(payload_json, '$.periodEnd') DESC, created_at DESC
+    `).all(scheduleId, periodStart, periodEnd, ...this.feishuScopeParams(scope));
+    const result: DigestCandidate[] = [];
+    for (const row of rows) {
+      let payload: DigestPayload;
+      try { payload = JSON.parse(textValue(row, "payload_json")) as DigestPayload; } catch { continue; }
+      if (!Array.isArray(payload.snapshot)) continue;
+      result.push(...payload.snapshot);
+    }
+    return result;
   }
 
   listDigestFeedbackStates(scope: FeishuScope, itemIds?: string[]): Map<string, boolean> {
@@ -592,6 +634,51 @@ export class RuntimeStore {
           updated_at = excluded.updated_at
       `).run(appId, tenantKey, ownerOpenId, itemId, targetInterested ? 1 : 0, message, now);
       return { outcome: "applied", interested: targetInterested };
+    });
+  }
+
+  ensureScheduledFeedDigestJob(scope: FeishuScope, schedule: DigestSchedule, period: DigestPeriod): Job | null {
+    const scopeParams = this.feishuScopeParams(scope);
+    const scopeKey = createHash("sha256").update(JSON.stringify(scopeParams)).digest("hex");
+    const key = `feed_digest:${scopeKey}:${schedule.id}:${period.key}`;
+    return this.transaction(() => {
+      if (this.getJobByIdempotencyKey(key)) return null;
+      const active = this.database.prepare(`
+        SELECT 1 FROM jobs
+        WHERE kind = 'feed_digest' AND state IN ('pending', 'running')
+          AND json_extract(payload_json, '$.scheduleId') = ? AND ${DIGEST_SCOPE_SQL}
+        LIMIT 1
+      `).get(schedule.id, ...scopeParams);
+      if (active) return null;
+
+      const candidates = schedule.mode === "new_items"
+        ? this.listFeedDigestCandidates(scope, schedule.sourceIds)
+        : schedule.mode === "trend_snapshot"
+          ? this.listFeedDigestSnapshot(schedule.sourceIds)
+          : this.listFeedDigestHistory(scope, schedule.sourceScheduleId!, period.periodStart, period.periodEnd);
+      const label = schedule.mode === "trend_snapshot" ? "GitHub 周报"
+        : schedule.mode === "period_summary" ? "GitHub 四周汇总" : "每日摘要";
+      const digest = buildFeedDigest(candidates, period.periodStart, schedule.maxItems,
+        this.listDigestFeedbackStates(scope, candidates.map(item => item.id)), { label, period: period.periodStart === period.periodEnd ? period.periodStart : `${period.periodStart} ~ ${period.periodEnd}` });
+      if (!digest) return null;
+      const id = this.newId();
+      const now = this.currentTime();
+      const payload: DigestPayload = {
+        version: 3,
+        scope: { appId: scope.appId, tenantKey: scope.tenantKey, ownerOpenId: scope.ownerOpenId },
+        date: period.periodStart,
+        scheduleId: schedule.id,
+        periodKey: period.key,
+        periodStart: period.periodStart,
+        periodEnd: period.periodEnd,
+        mode: schedule.mode,
+        ...digest,
+      };
+      this.database.prepare(`INSERT INTO jobs (id, origin_turn_id, kind, payload_json, idempotency_key,
+        result_json, error_code, state, available_at, run_token, lease_expires_at, attempts, max_attempts, created_at, updated_at)
+        VALUES (?, NULL, 'feed_digest', ?, ?, NULL, NULL, 'pending', ?, NULL, NULL, 0, 3, ?, ?)`)
+        .run(id, encodeJson(payload, "payload"), key, now, now, now);
+      return this.getJobRequired(id);
     });
   }
 

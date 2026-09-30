@@ -98,4 +98,4 @@
 
 这些功能只有在现有工作流出现明确瓶颈时才重新评估。
 
-The feed ingestion and Feishu digest slices are implemented in `add-feed-ingestion` and `add-feed-digest-feishu`: YAML source configuration, RSS/Atom polling, baseline and candidate state, durable jobs, daily digest generation, proactive Feishu notification, and restart recovery.
+The feed ingestion and Feishu digest slices are implemented in `add-feed-ingestion`, `add-feed-digest-feishu` and `add-github-trending-source`: YAML source configuration, RSS/Atom/GitHub Trending polling, baseline and candidate state, bounded connector metadata, durable jobs, daily digest generation, proactive Feishu notification, and restart recovery.

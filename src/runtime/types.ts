@@ -89,6 +89,8 @@ export type FeedSource = {
   updatedAt: number;
 };
 
+export type FeedItemMetadata = Record<string, string | number | boolean | null>;
+
 export type FeedItem = {
   id: string;
   feedId: string;
@@ -98,6 +100,7 @@ export type FeedItem = {
   summary: string | null;
   author: string | null;
   publishedAt: number | null;
+  metadata?: FeedItemMetadata;
   firstSeenAt: number;
   state: "baseline" | "candidate";
   notifiedAt: number | null;

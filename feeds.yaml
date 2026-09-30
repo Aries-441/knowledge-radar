@@ -1,13 +1,39 @@
-﻿# Local feed subscriptions for Knowledge Radar.
+# Local feed subscriptions for Knowledge Radar.
 timezone: Asia/Shanghai
 pollIntervalMinutes: 30
 digest:
   enabled: true
   time: "09:00"
   maxItems: 20
-feeds:
+  schedules:
+    - id: blogs-daily
+      mode: new_items
+      frequency: daily
+      time: "09:00"
+      maxItems: 20
+      sourceIds:
+        - anthropic-engineering
+    - id: github-weekly
+      mode: trend_snapshot
+      frequency: weekly
+      weekday: 1
+      time: "09:00"
+      maxItems: 20
+      sourceIds:
+        - github-trending-weekly
+    - id: github-four-week
+      mode: period_summary
+      frequency: every_n_weeks
+      anchorDate: "2026-09-28"
+      intervalWeeks: 4
+      time: "09:30"
+      maxItems: 50
+      sourceScheduleId: github-weekly
+      sourceIds: []
+sources:
   - id: anthropic-engineering
     name: Anthropic Engineering
+    kind: rss
     url: https://rsshub.bestblogs.dev/anthropic/engineering
     enabled: true
     priority: 0
@@ -15,3 +41,16 @@ feeds:
       - ai
       - engineering
     itemLimit: 100
+  - id: github-trending-weekly
+    name: GitHub Trending
+    kind: github_trending
+    url: https://github.com/trending
+    enabled: true
+    priority: 0
+    tags:
+      - github
+      - trends
+    connectorConfig:
+      period: weekly
+      language: all
+    itemLimit: 20

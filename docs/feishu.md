@@ -21,6 +21,12 @@
 
 卡片交互使用与订阅和对话相同的 `app_id`、`tenant_key`、`owner_open_id` 范围。更换这些身份前应先完成旧实例的队列处理，并备份状态库。
 
+### 摘要卡片主题
+
+卡片会按来源类型区分颜色和分组，方便在混合摘要中快速识别内容：RSS/博客使用青绿色，GitHub Trending 使用靛蓝色，GitHub Releases 使用紫色，arXiv 使用紫罗兰色，Newsletter 使用橙色，微信公众号使用绿色，未知来源使用灰色。混合来源卡片的总标题使用中性蓝色，每个来源分组保留自己的浅色背景。
+
+主题只影响 Card 2.0 的标题模板、来源标签和分组背景，不改变文章排序、摘要内容或星标回调。新增 connector 时在 `src/feed/card-themes.ts` 注册 `sourceKind`，同时补充 resolver 和卡片结构测试；缺少 `sourceKind` 的历史数据会从旧的 provider 元数据推断，无法推断时使用灰色兜底。
+
 [事件说明](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)、[权限列表](https://feishu.apifox.cn/doc-1939254)、[官方长连接 SDK](https://github.com/larksuite/node-sdk/blob/main/README.zh.md)。
 
 复制 `.env.example` 为 `.env`，只在本地填入：
@@ -64,7 +70,7 @@ docker compose -p knowledge-radar-feishu -f compose.feishu.yaml stop
 
 此文件可独立使用，不要叠加文章采集的 compose.yaml。非 root 用户运行，无监听端口；命名卷挂到 /var/lib/knowledge-radar，数据库固定为其下 radar.db。密钥通过环境变量注入，不会进入镜像，但本机有 Docker 管理权限的人仍可读取容器配置。
 
-每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v7，旧代码拒绝 v7；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
+每次部署保持相同 Compose project 名，否则会创建另一套状态卷，看起来像“丢失历史”。可用 RADAR_ENV_FILE 指向另一份 env 文件，默认 .env；离线容器验收使用 .env.example。不运行 `down -v`，它会删除持久卷。状态库会从旧版本原子迁移到 v8，旧代码拒绝 v8；升级前停止服务并做一致性 SQLite 备份，Markdown 单独备份。回滚需恢复旧代码和迁移前数据库；保留新 Markdown 待核对，不批量删除。备份后的任务与消息去重状态会丢失，恢复后可能重复处理。
 
 ### 开启公开文章采集
 
